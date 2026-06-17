@@ -10,3 +10,7 @@ env/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Runtime data / test artifacts
+shop.db
+memory_test_*.md
