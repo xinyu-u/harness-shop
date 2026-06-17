@@ -5,11 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>店面 · Front Desk</title>
 
+<!-- Google Fonts：非阻塞加载——拿不到也不卡渲染，会自动 fallback 到 system-ui / serif -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..800;1,9..144,400..800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..800;1,9..144,400..800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;700&display=swap"
+      media="print" onload="this.media='all'">
 
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<!-- Vue 落地：走本地 /static，不依赖外网 CDN -->
+<script src="/static/vue.global.prod.js"></script>
 
 <style>
   :root {
@@ -24,6 +28,7 @@
     --accent:       #C8431A;
     --accent-deep:  #A0341A;
     --success:      #3D5234;
+    --merchant:     #3D5234;
   }
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -37,7 +42,6 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* 纸面噪点：弱到几乎看不见，但让背景不像平涂 */
   body::before {
     content: '';
     position: fixed; inset: 0;
@@ -61,7 +65,6 @@
     padding: 0 28px;
   }
 
-  /* ============ Header ============ */
   header {
     padding: 60px 0 28px;
     border-bottom: 1px solid var(--rule);
@@ -114,37 +117,176 @@
     50%      { box-shadow: 0 0 0 6px rgba(200,67,26,0.04); }
   }
 
-  /* 签到牌 */
+  /* 登录后的"签到牌"——显示 user_id + role + 退出按钮 */
   .user-pill {
     position: absolute;
     top: 64px;
     right: 0;
     display: flex;
     align-items: center;
+    gap: 10px;
     background: var(--card);
-    padding: 9px 12px 9px 14px;
+    padding: 9px 12px;
     border: 1px solid var(--ink);
     box-shadow: 3px 3px 0 var(--ink);
   }
-  .user-pill label {
+  .user-pill .uid {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 14, 'wght' 600;
+    font-size: 16px;
+    color: var(--ink);
+  }
+  .user-pill .role {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px;
     letter-spacing: 0.18em;
     text-transform: uppercase;
     color: var(--ink-faded);
-    margin-right: 10px;
+    padding: 2px 6px;
+    border: 1px solid var(--rule);
   }
-  .user-pill input {
-    border: none;
+  .user-pill .role.merchant {
+    color: var(--merchant);
+    border-color: var(--merchant);
+  }
+  .user-pill .logout {
     background: transparent;
+    border: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .user-pill .logout:hover { color: var(--accent); }
+
+  /* ============ 登录/注册卡片 ============ */
+  .auth-card {
+    margin: 50px 0;
+    background: var(--card);
+    border: 1px solid var(--ink);
+    box-shadow: 4px 4px 0 var(--ink);
+    padding: 36px 36px 32px;
+  }
+  .auth-card .label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin-bottom: 14px;
+  }
+  .auth-card h2 {
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 60, 'wght' 600;
+    font-size: 28px;
+    line-height: 1.25;
+    color: var(--ink);
+    margin-bottom: 24px;
+    letter-spacing: -0.01em;
+  }
+  .auth-card h2 em {
+    font-style: italic;
+    color: var(--accent);
+    font-variation-settings: 'opsz' 60, 'wght' 500;
+  }
+
+  .auth-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .auth-tab {
+    flex: 1;
+    background: transparent;
+    border: none;
+    padding: 12px 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .auth-tab.active {
+    color: var(--ink);
+    border-bottom-color: var(--accent);
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+  .field label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+  }
+  .field input {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    padding: 10px 14px;
     font-family: 'Fraunces', serif;
-    font-variation-settings: 'opsz' 14, 'wght' 600;
+    font-variation-settings: 'opsz' 14, 'wght' 500;
     font-size: 16px;
     color: var(--ink);
-    width: 100px;
     outline: none;
   }
-  .user-pill input::placeholder { color: var(--ink-faded); font-style: italic; }
+  .field input:focus { border-color: var(--ink); }
+
+  .auth-submit {
+    width: 100%;
+    background: var(--accent);
+    color: var(--card);
+    border: none;
+    padding: 14px;
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 14, 'wght' 600;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    box-shadow: 3px 3px 0 var(--ink);
+    margin-top: 8px;
+  }
+  .auth-submit:hover { background: var(--accent-deep); }
+  .auth-submit:active {
+    transform: translate(3px, 3px);
+    box-shadow: 0 0 0 var(--ink);
+  }
+  .auth-submit:disabled {
+    background: var(--card-deep);
+    color: var(--ink-faded);
+    box-shadow: 3px 3px 0 var(--rule);
+    cursor: not-allowed;
+  }
+
+  .auth-error {
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: rgba(200,67,26,0.06);
+    border-left: 3px solid var(--accent);
+    color: var(--accent-deep);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .auth-hint {
+    margin-top: 18px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    line-height: 1.6;
+  }
 
   /* ============ Conversation ============ */
   .conversation {
@@ -155,7 +297,6 @@
     gap: 32px;
   }
 
-  /* 空状态：邀请,而不是装饰 */
   .empty {
     margin-top: 20px;
     padding: 30px 32px 32px;
@@ -216,7 +357,6 @@
     font-family: 'JetBrains Mono', monospace;
   }
 
-  /* 用户的话：右对齐,无衬线,右边一条墨条 */
   .turn-user {
     align-self: flex-end;
     max-width: 78%;
@@ -240,7 +380,6 @@
     border-right: 2px solid var(--ink);
   }
 
-  /* 店主的话：左对齐,衬线斜体,有一段横线作为"开口的小动作" */
   .turn-agent {
     align-self: flex-start;
     max-width: 90%;
@@ -274,7 +413,6 @@
     white-space: pre-wrap;
   }
 
-  /* 等待状态:翻看货架 */
   .turn-loading .body {
     font-family: 'JetBrains Mono', monospace;
     font-style: normal;
@@ -296,7 +434,6 @@
     100% { content: '·'; }
   }
 
-  /* 错误:不是道歉,是诊断 */
   .turn-error {
     align-self: stretch;
     padding: 14px 18px;
@@ -316,7 +453,6 @@
     margin-bottom: 4px;
   }
 
-  /* ============ Composer ============ */
   .composer {
     position: sticky;
     bottom: 0;
@@ -331,7 +467,6 @@
     box-shadow: 4px 4px 0 var(--ink);
   }
 
-  /* 文本区:画着横格线的写字板 */
   textarea {
     width: 100%;
     min-height: 92px;
@@ -409,7 +544,6 @@
     color: var(--ink);
   }
 
-  /* 响应式 */
   @media (max-width: 600px) {
     #app { padding: 0 18px; }
     header { padding-top: 42px; }
@@ -421,6 +555,7 @@
     }
     .turn-agent .body { font-size: 18px; }
     .empty h2 { font-size: 22px; }
+    .auth-card { padding: 24px; }
     .composer-hint { flex-direction: column; gap: 6px; }
     textarea { padding-right: 22px; }
     .send { position: static; width: 100%; margin: 12px 0 0; box-shadow: 3px 3px 0 var(--ink); }
@@ -444,70 +579,176 @@
       <span class="dot"></span>
       <span>客服在班 · clerk on duty</span>
     </div>
-    <label class="user-pill">
-      <span>签到</span>
-      <input v-model="userId" placeholder="alice" maxlength="24" autocomplete="off" spellcheck="false">
-    </label>
+    <div v-if="auth.token" class="user-pill">
+      <span class="uid">{{ auth.user_id }}</span>
+      <span class="role" :class="{ merchant: auth.role === 'merchant' }">{{ auth.role }}</span>
+      <button class="logout" @click="logout">退出</button>
+    </div>
   </header>
 
   <main class="conversation" ref="conv">
-    <div class="empty" v-if="turns.length === 0 && !loading">
-      <div class="label">还没有对话 · No exchange yet</div>
-      <h2>什么都还没说呢。<br>问问看店主<em>——</em></h2>
-      <div class="suggestions">
-        <button @click="sendQuick('airmax 42 码有货吗？')">airmax 42 码有货吗？</button>
-        <button @click="sendQuick('我 175cm 65kg，鞋穿几码？')">我 175cm 65kg，鞋穿几码？</button>
-        <button @click="sendQuick('帮我下一单 airmax 42 码')">帮我下一单 airmax 42 码</button>
-        <button @click="sendQuick('我的尺码记一下：42')">让店主记下我的尺码：42</button>
+    <!-- 未登录：登录/注册卡片 -->
+    <div v-if="!auth.token" class="auth-card">
+      <div class="label">{{ mode === 'login' ? '签到 · sign in' : '开新户 · sign up' }}</div>
+      <h2 v-if="mode === 'login'">欢迎回来<em>，</em>请签到。</h2>
+      <h2 v-else>第一次来<em>？</em>留个账号。</h2>
+
+      <div class="auth-tabs">
+        <button class="auth-tab" :class="{ active: mode === 'login' }" @click="switchMode('login')">登录</button>
+        <button class="auth-tab" :class="{ active: mode === 'register' }" @click="switchMode('register')">注册</button>
       </div>
+
+      <form @submit.prevent="submitAuth">
+        <div class="field">
+          <label>账号</label>
+          <input v-model="form.user_id" placeholder="alice" maxlength="24" autocomplete="username" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>密码</label>
+          <input v-model="form.password" type="password" placeholder="至少 4 位" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'">
+        </div>
+        <button class="auth-submit" type="submit" :disabled="!canSubmitAuth || authLoading">
+          {{ authLoading ? '正在...' : (mode === 'login' ? '签到进店' : '注册并进店') }}
+        </button>
+        <div v-if="authError" class="auth-error">{{ authError }}</div>
+        <div class="auth-hint">
+          注册自动建普通用户。<br>
+          商家账号由店主用 seed_merchant.py 在数据库直接种。
+        </div>
+      </form>
     </div>
 
-    <template v-for="(t, i) in turns" :key="i">
-      <div v-if="t.role === 'user'" class="turn-user">
-        <div class="meta">你 · {{ t.time }}</div>
-        <div class="body">{{ t.text }}</div>
+    <!-- 已登录：原来的对话 UI -->
+    <template v-else>
+      <div class="empty" v-if="turns.length === 0 && !loading">
+        <div class="label">还没有对话 · No exchange yet</div>
+        <h2 v-if="auth.role !== 'merchant'">什么都还没说呢。<br>问问看店主<em>——</em></h2>
+        <h2 v-else>店主好<em>。</em>今天想改什么？</h2>
+        <div class="suggestions" v-if="auth.role !== 'merchant'">
+          <button @click="sendQuick('airmax 42 码有货吗？')">airmax 42 码有货吗？</button>
+          <button @click="sendQuick('我 175cm 65kg，鞋穿几码？')">我 175cm 65kg，鞋穿几码？</button>
+          <button @click="sendQuick('帮我下一单 airmax 42 码')">帮我下一单 airmax 42 码</button>
+          <button @click="sendQuick('我的尺码记一下：42')">让店主记下我的尺码：42</button>
+        </div>
+        <div class="suggestions" v-else>
+          <button @click="sendQuick('把 airmax 改成 799 元')">把 airmax 改成 799 元</button>
+          <button @click="sendQuick('上架一个新商品：jeans，牛仔裤，下衣类，价格 299')">上架 jeans，¥299</button>
+          <button @click="sendQuick('airmax 现在卖多少钱？')">airmax 现在卖多少钱？</button>
+        </div>
       </div>
-      <div v-else-if="t.role === 'agent'" class="turn-agent">
-        <div class="meta">店主 · clerk · {{ t.time }}</div>
-        <div class="body">{{ t.text }}</div>
-      </div>
-      <div v-else-if="t.role === 'error'" class="turn-error">
-        <strong>线断了 · network error</strong>
-        {{ t.text }}
-      </div>
+
+      <template v-for="(t, i) in turns" :key="i">
+        <div v-if="t.role === 'user'" class="turn-user">
+          <div class="meta">你 · {{ t.time }}</div>
+          <div class="body">{{ t.text }}</div>
+        </div>
+        <div v-else-if="t.role === 'agent'" class="turn-agent" :class="{ 'turn-loading': t.pending }">
+          <div class="meta">{{ auth.role === 'merchant' ? '助手 · merchant assistant' : '店主 · clerk' }} · {{ t.time }}</div>
+          <div class="body">
+            {{ t.text }}<span v-if="t.pending && t.busy !== false" class="dots"></span>
+          </div>
+        </div>
+        <div v-else-if="t.role === 'error'" class="turn-error">
+          <strong>线断了 · network error</strong>
+          {{ t.text }}
+        </div>
+      </template>
     </template>
-
-    <div v-if="loading" class="turn-agent turn-loading">
-      <div class="meta">店主 · {{ now }}</div>
-      <div class="body">正在翻看货架<span class="dots"></span></div>
-    </div>
   </main>
 
-  <div class="composer">
+  <div class="composer" v-if="auth.token">
     <div class="composer-shell">
       <textarea
         v-model="draft"
-        :placeholder="userId.trim() ? '想问点什么？' : '先在右上角签到，再来说话。'"
+        placeholder="想问点什么？"
         @keydown.enter.exact.prevent="send"
-        :disabled="!userId.trim() || loading"
+        :disabled="loading"
         rows="3"
       ></textarea>
       <button class="send" @click="send" :disabled="!canSend">送出</button>
     </div>
     <div class="composer-hint">
-      <span>{{ apiUrl }}</span>
+      <span>{{ apiBase }}</span>
       <span><kbd>Enter</kbd> 送出&nbsp;·&nbsp;<kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
     </div>
   </div>
 </div>
 
 <script>
-const { createApp, ref, computed, nextTick } = Vue;
+const { createApp, ref, reactive, computed, nextTick } = Vue;
 
 createApp({
   setup() {
-    const apiUrl = 'http://localhost:8000/chat';
-    const userId  = ref(localStorage.getItem('shop_uid') || '');
+    const apiBase = 'http://localhost:8000';
+
+    // ----- 认证状态 -----
+    const auth = reactive(loadAuth());
+    const mode = ref('login');
+    const form = reactive({ user_id: '', password: '' });
+    const authError = ref('');
+    const authLoading = ref(false);
+
+    function loadAuth() {
+      try {
+        const raw = localStorage.getItem('shop_auth');
+        if (raw) return JSON.parse(raw);
+      } catch (_) {}
+      return { token: '', user_id: '', role: '' };
+    }
+    function saveAuth() {
+      localStorage.setItem('shop_auth', JSON.stringify({ ...auth }));
+    }
+    function clearAuth() {
+      auth.token = ''; auth.user_id = ''; auth.role = '';
+      localStorage.removeItem('shop_auth');
+    }
+
+    const canSubmitAuth = computed(() =>
+      form.user_id.trim().length > 0 && form.password.length >= 4
+    );
+
+    function switchMode(m) {
+      mode.value = m;
+      authError.value = '';
+    }
+
+    async function submitAuth() {
+      if (!canSubmitAuth.value) return;
+      authError.value = '';
+      authLoading.value = true;
+      try {
+        const r = await fetch(apiBase + '/' + mode.value, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: form.user_id.trim(),
+            password: form.password,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          authError.value = data.detail || ('HTTP ' + r.status);
+          return;
+        }
+        auth.token   = data.token;
+        auth.user_id = data.user_id;
+        auth.role    = data.role;
+        saveAuth();
+        form.password = '';
+        turns.value = [];   // 切账号清旧对话
+      } catch (e) {
+        authError.value = e.message || String(e);
+      } finally {
+        authLoading.value = false;
+      }
+    }
+
+    function logout() {
+      clearAuth();
+      turns.value = [];
+    }
+
+    // ----- 对话状态 -----
     const draft   = ref('');
     const turns   = ref([]);
     const loading = ref(false);
@@ -519,34 +760,120 @@ createApp({
     }
 
     const canSend = computed(() =>
-      userId.value.trim() && draft.value.trim() && !loading.value
+      auth.token && draft.value.trim() && !loading.value
     );
 
     function scrollDown() {
       nextTick(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
     }
 
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function revealReply(turn, replyText) {
+      const text = replyText || '(店主沉默)';
+      const chars = Array.from(text);
+      const batch = chars.length > 100 ? 2 : 1;
+      turn.text = '';
+      for (let i = 0; i < chars.length; i += batch) {
+        turn.text += chars.slice(i, i + batch).join('');
+        if (i % 6 === 0) scrollDown();
+        await sleep(14);
+      }
+    }
+
+    async function readStreamEvents(response, onEvent) {
+      if (!response.body) {
+        const data = await response.json();
+        await onEvent({ type: 'final', reply: data.reply || '' });
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let lineEnd = buffer.indexOf('\n');
+        while (lineEnd >= 0) {
+          const line = buffer.slice(0, lineEnd).trim();
+          buffer = buffer.slice(lineEnd + 1);
+          if (line) await onEvent(JSON.parse(line));
+          lineEnd = buffer.indexOf('\n');
+        }
+      }
+
+      buffer += decoder.decode();
+      const tail = buffer.trim();
+      if (tail) await onEvent(JSON.parse(tail));
+    }
+
     async function send() {
       if (!canSend.value) return;
       const text = draft.value.trim();
-      const uid  = userId.value.trim();
       draft.value = '';
-      localStorage.setItem('shop_uid', uid);
       turns.value.push({ role: 'user', text, time: stamp() });
+      const assistantTurn = {
+        role: 'agent',
+        text: '正在理解你的需求…',
+        time: stamp(),
+        pending: true,
+        busy: true,
+      };
+      turns.value.push(assistantTurn);
       loading.value = true;
       now.value = stamp();
       scrollDown();
       try {
-        const r = await fetch(apiUrl, {
+        const r = await fetch(apiBase + '/chat/stream', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: uid, message: text }),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + auth.token,
+          },
+          body: JSON.stringify({ message: text }),
         });
-        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
-        const data = await r.json();
-        turns.value.push({ role: 'agent', text: data.reply || '(店主沉默)', time: stamp() });
+        if (r.status === 401) {
+          // token 过期/失效：清掉，回登录页
+          assistantTurn.role = 'error';
+          assistantTurn.text = '登录已过期，请重新签到。';
+          assistantTurn.pending = false;
+          clearAuth();
+          return;
+        }
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          throw new Error(data.detail || ('HTTP ' + r.status + ' ' + r.statusText));
+        }
+        let gotFinal = false;
+        await readStreamEvents(r, async (event) => {
+          if (event.type === 'status') {
+            assistantTurn.pending = true;
+            assistantTurn.busy = event.busy !== false;
+            assistantTurn.text = event.text || '正在处理…';
+            scrollDown();
+          } else if (event.type === 'final') {
+            gotFinal = true;
+            assistantTurn.pending = false;
+            assistantTurn.busy = false;
+            await revealReply(assistantTurn, event.reply);
+          } else if (event.type === 'error') {
+            throw new Error(event.message || '流式响应失败');
+          }
+        });
+        if (!gotFinal) {
+          throw new Error('没有收到最终回复');
+        }
       } catch (e) {
-        turns.value.push({ role: 'error', text: (e && e.message) ? e.message : String(e) });
+        assistantTurn.role = 'error';
+        assistantTurn.text = (e && e.message) ? e.message : String(e);
+        assistantTurn.pending = false;
+        assistantTurn.busy = false;
       } finally {
         loading.value = false;
         scrollDown();
@@ -554,16 +881,15 @@ createApp({
     }
 
     function sendQuick(text) {
-      if (!userId.value.trim()) {
-        const el = document.querySelector('.user-pill input');
-        if (el) el.focus();
-        return;
-      }
       draft.value = text;
       send();
     }
 
-    return { apiUrl, userId, draft, turns, loading, now, canSend, send, sendQuick };
+    return {
+      apiBase,
+      auth, mode, form, authError, authLoading, canSubmitAuth, switchMode, submitAuth, logout,
+      draft, turns, loading, now, canSend, send, sendQuick,
+    };
   }
 }).mount('#app');
 </script>

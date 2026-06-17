@@ -19,11 +19,18 @@ class RunConfig:
     max_turns: int = 8
     confirm: Callable | None = None
     system_prompt: str | None = None
+    role: str = "user"   # 当前会话角色：决定哪些工具可见可用（步骤5）
 
 
 async def run_query(config: RunConfig, messages: list[ConversationMessage]):
     """对话循环。config=不变配置，messages=流动数据。"""
-    tool_schemas = [t.to_api_schema() for t in config.tools.values()]
+    # 按 role 过滤可见工具：模型根本看不到自己用不了的工具，
+    # 既省 token，又避免"模型尝试 → 被拒 → 再尝试"的来回。
+    visible_tools = {
+        name: t for name, t in config.tools.items()
+        if t.allowed_roles is None or config.role in t.allowed_roles
+    }
+    tool_schemas = [t.to_api_schema() for t in visible_tools.values()]
 
     turn_count = 0
     while turn_count < config.max_turns:
@@ -58,6 +65,18 @@ async def run_query(config: RunConfig, messages: list[ConversationMessage]):
                 messages.append(ConversationMessage(role="user", content=[result]))
                 continue
 
+            # 角色门禁兜底：理论上模型看不到这工具就不会调它，
+            # 但如果它瞎编名字蒙对了，也要在执行前拦下来。
+            if tool.allowed_roles is not None and config.role not in tool.allowed_roles:
+                result = ToolResultBlock(
+                    tool_use_id=tc.id,
+                    content=f"权限不足：{tc.name} 仅限 {sorted(tool.allowed_roles)} 角色使用，当前 role={config.role}",
+                    is_error=True,
+                )
+                yield ToolExecutionCompleted(tool_name=tc.name, output=result.content, is_error=True)
+                messages.append(ConversationMessage(role="user", content=[result]))
+                continue
+
             try:
                 parsed = tool.input_model.model_validate(tc.input)
             except Exception as exc:
@@ -88,16 +107,23 @@ async def run_query(config: RunConfig, messages: list[ConversationMessage]):
 class QueryEngine:
     """管理器：持有会话状态 + 配置。"""
 
-    def __init__(self, client, tools, max_turns: int = 8, confirm=None, user_id: str = "default"):
-        self._config = RunConfig(client=client, tools=tools, max_turns=max_turns, confirm=confirm)
+    def __init__(self, client, tools, max_turns: int = 8, confirm=None,
+                 user_id: str = "default", role: str = "user"):
+        self._config = RunConfig(
+            client=client, tools=tools, max_turns=max_turns,
+            confirm=confirm, role=role,
+        )
         self._messages: list[ConversationMessage] = []
         self._user_id = user_id
+        self._role = role
 
     async def submit_message(self, prompt: str):
         # 阶段6：读记忆，拼进 system_prompt（每次 submit 更新）
         memory = load_memory(self._user_id)
+        role_hint = "（你正在和商家对话，可以使用商家专属工具改价/上架）" if self._role == "merchant" else ""
         self._config.system_prompt = (
             "你是电商客服助手，帮用户查商品、查库存、推荐尺码、下单。"
+            + role_hint
             + (f"\n\n# 你记得的用户信息\n{memory}\n" if memory else "")
         )
         self._messages.append(

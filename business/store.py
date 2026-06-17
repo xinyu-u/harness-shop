@@ -35,6 +35,20 @@ class Store(ABC):
     @abstractmethod
     def cancel_order(self, order_id: int) -> bool: ...
 
+    # ---- 用户/账号 ----
+    @abstractmethod
+    def create_user(self, user_id: str, password_hash: str, role: str = "user") -> None: ...
+
+    @abstractmethod
+    def get_user(self, user_id: str) -> dict | None: ...
+
+    # ---- 商家工具 ----
+    @abstractmethod
+    def set_price(self, product_id: str, price: int) -> bool: ...
+
+    @abstractmethod
+    def add_product(self, product_id: str, name: str, price: int, category: str) -> bool: ...
+
 
 class MemoryStore(Store):
     """字典实现：第一期用它。"""
@@ -59,6 +73,7 @@ class MemoryStore(Store):
             ("上衣", 168, 195, 60, 100, "L"),
         ]
         self._orders: list[dict] = []
+        self._users: dict[str, dict] = {}   # user_id -> {password_hash, role}
 
     def get_product(self, product_id):
         return self._products.get(product_id)
@@ -114,6 +129,34 @@ class MemoryStore(Store):
             return False   # 已经取消过了
         order["status"] = "cancelled"
         self._inventory[(order["product_id"], order["size"])] += order["qty"]  # 退回库存
+        return True
+
+    # ---- 账号 ----
+    def create_user(self, user_id, password_hash, role="user"):
+        uid = user_id.lower()
+        if uid in self._users:
+            raise ValueError(f"用户已存在: {uid}")
+        self._users[uid] = {"password_hash": password_hash, "role": role}
+
+    def get_user(self, user_id):
+        u = self._users.get(user_id.lower())
+        if u is None:
+            return None
+        return {"user_id": user_id.lower(), **u}
+
+    # ---- 商家工具 ----
+    def set_price(self, product_id, price):
+        if product_id not in self._products:
+            return False
+        self._products[product_id]["price"] = price
+        return True
+
+    def add_product(self, product_id, name, price, category):
+        if product_id in self._products:
+            return False
+        self._products[product_id] = {
+            "id": product_id, "name": name, "price": price, "category": category,
+        }
         return True
 
 
@@ -181,6 +224,15 @@ class SqliteStore(Store):
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_request_id ON orders(request_id)"
         )
+        # 5) 用户表（账号 + 角色）
+        # user_id 在写入前已被 lower()，所以这里不再区分大小写
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user'
+            )
+        """)
 
         # 每张表只在空时塞初始数据，避免每次启动重复 INSERT
         if self._conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
@@ -341,3 +393,45 @@ class SqliteStore(Store):
         )
         self._conn.commit()
         return True
+
+    # ---- 账号 ----
+    def create_user(self, user_id, password_hash, role="user"):
+        # user_id 统一小写：注册和登录走同一规则
+        uid = user_id.lower()
+        try:
+            self._conn.execute(
+                "INSERT INTO users (user_id, password_hash, role) VALUES (?, ?, ?)",
+                (uid, password_hash, role),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            raise ValueError(f"用户已存在: {uid}")
+
+    def get_user(self, user_id):
+        row = self._conn.execute(
+            "SELECT user_id, password_hash, role FROM users WHERE user_id = ?",
+            (user_id.lower(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"user_id": row[0], "password_hash": row[1], "role": row[2]}
+
+    # ---- 商家工具 ----
+    def set_price(self, product_id, price):
+        cur = self._conn.execute(
+            "UPDATE products SET price = ? WHERE id = ?",
+            (price, product_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def add_product(self, product_id, name, price, category):
+        try:
+            self._conn.execute(
+                "INSERT INTO products (id, name, price, category) VALUES (?, ?, ?, ?)",
+                (product_id, name, price, category),
+            )
+            self._conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False   # 主键冲突 → 商品已存在

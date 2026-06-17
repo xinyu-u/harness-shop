@@ -29,7 +29,7 @@ class FakeClient:
     def __init__(self, scripted: list[ConversationMessage] | None = None):
         self.call_count = 0
         self.scripted = scripted
-        self.last_system_prompt = None   # 记录收到的 system_prompt，方便测试断言
+        self.last_system_prompt = None   #  记录收到的 system_prompt，方便测试断言
 
     async def stream_message(self, messages, tools=None, system_prompt=None):
         self.last_system_prompt = system_prompt

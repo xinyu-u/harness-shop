@@ -188,6 +188,64 @@ class CancelOrderTool(BaseTool):
         return ToolResult(output=f"订单 {arguments.order_id} 已取消")
 
 
+# ============ B类·商家专属：update_price ============
+
+class UpdatePriceInput(BaseModel):
+    product_id: str = Field(description="要改价的商品ID")
+    price: int = Field(description="新价格（整数）", gt=0)
+
+
+class UpdatePriceTool(BaseTool):
+    name = "update_price"
+    description = "修改商品价格。仅商家可用。"
+    input_model = UpdatePriceInput
+    is_write = True
+    allowed_roles = {"merchant"}
+
+    def __init__(self, store: Store):
+        self._store = store
+
+    async def execute(self, arguments: UpdatePriceInput) -> ToolResult:
+        try:
+            ok = self._store.set_price(arguments.product_id, arguments.price)
+        except Exception as e:
+            return ToolResult(output=f"改价失败：{e}", is_error=True)
+        if not ok:
+            return ToolResult(output=f"商品 {arguments.product_id} 不存在", is_error=True)
+        return ToolResult(output=f"已将 {arguments.product_id} 的价格改为 ¥{arguments.price}")
+
+
+# ============ B类·商家专属：add_product ============
+
+class AddProductInput(BaseModel):
+    product_id: str = Field(description="新商品ID（唯一）")
+    name: str = Field(description="商品名")
+    price: int = Field(description="价格", gt=0)
+    category: str = Field(description="品类，如 鞋 / 上衣")
+
+
+class AddProductTool(BaseTool):
+    name = "add_product"
+    description = "新增商品（不含初始库存）。仅商家可用。"
+    input_model = AddProductInput
+    is_write = True
+    allowed_roles = {"merchant"}
+
+    def __init__(self, store: Store):
+        self._store = store
+
+    async def execute(self, arguments: AddProductInput) -> ToolResult:
+        try:
+            ok = self._store.add_product(
+                arguments.product_id, arguments.name, arguments.price, arguments.category
+            )
+        except Exception as e:
+            return ToolResult(output=f"上架失败：{e}", is_error=True)
+        if not ok:
+            return ToolResult(output=f"商品 {arguments.product_id} 已存在", is_error=True)
+        return ToolResult(output=f"已上架：{arguments.product_id} | {arguments.name} | ¥{arguments.price}")
+
+
 # ============ 记忆工具：模型自己决定记什么 ============
 
 class WriteMemoryInput(BaseModel):
@@ -211,7 +269,11 @@ class WriteMemoryTool(BaseTool):
 # ============ 工具表 ============
 
 def build_tools(store: Store, user_id: str = "default") -> dict[str, BaseTool]:
-    """建好所有工具，返回工具表（共用同一个 store）。"""
+    """建好所有工具，返回工具表（共用同一个 store）。
+
+    商家工具（update_price/add_product）也注册进来——是否可见/可用由 role 在
+    run_query 里决定（allowed_roles={"merchant"}），工具本身不知道自己被特殊对待。
+    """
     tools = [
         SearchProductsTool(store),
         CheckStockTool(store),
@@ -220,5 +282,7 @@ def build_tools(store: Store, user_id: str = "default") -> dict[str, BaseTool]:
         PlaceOrderTool(store, user_id),
         CancelOrderTool(store),
         WriteMemoryTool(user_id),
+        UpdatePriceTool(store),
+        AddProductTool(store),
     ]
     return {t.name: t for t in tools}
