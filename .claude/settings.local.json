@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/ShenZhenUniverisity/.claude/skills/**)",
+      "Read(//c/Users/ShenZhenUniverisity/.claude/plugins/**)"
+    ]
+  }
+}

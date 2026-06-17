@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>店面 · Front Desk</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..800;1,9..144,400..800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;700&display=swap" rel="stylesheet">
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+
+<style>
+  :root {
+    --paper:        #D5D2BD;
+    --paper-shade:  #C7C3AB;
+    --card:         #F1ECDE;
+    --card-deep:    #E8E2CF;
+    --ink:          #1F1A14;
+    --ink-soft:     #5C5446;
+    --ink-faded:    #8E8472;
+    --rule:         #B8B49C;
+    --accent:       #C8431A;
+    --accent-deep:  #A0341A;
+    --success:      #3D5234;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    min-height: 100%;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Inter', 'Noto Serif SC', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 纸面噪点：弱到几乎看不见，但让背景不像平涂 */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.5;
+    background-image:
+      radial-gradient(rgba(31,26,20,0.045) 1px, transparent 1px),
+      radial-gradient(rgba(31,26,20,0.03)  1px, transparent 1px);
+    background-size: 3px 3px, 7px 7px;
+    background-position: 0 0, 1.5px 1.5px;
+  }
+
+  #app {
+    position: relative; z-index: 1;
+    max-width: 760px;
+    margin: 0 auto;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    padding: 0 28px;
+  }
+
+  /* ============ Header ============ */
+  header {
+    padding: 60px 0 28px;
+    border-bottom: 1px solid var(--rule);
+    position: relative;
+  }
+
+  .shop-name {
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 144, 'wght' 700;
+    font-size: clamp(48px, 7.5vw, 78px);
+    line-height: 0.95;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+  }
+  .shop-name em {
+    font-style: italic;
+    font-variation-settings: 'opsz' 144, 'wght' 500;
+    color: var(--accent);
+    font-size: 0.7em;
+    padding: 0 0.05em;
+    vertical-align: 0.06em;
+  }
+  .shop-name span.alt {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 144, 'wght' 400;
+    font-style: italic;
+    letter-spacing: -0.02em;
+  }
+
+  .shop-eyebrow {
+    margin-top: 18px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .shop-eyebrow .dot {
+    width: 7px; height: 7px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px rgba(200,67,26,0.18);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(200,67,26,0.18); }
+    50%      { box-shadow: 0 0 0 6px rgba(200,67,26,0.04); }
+  }
+
+  /* 签到牌 */
+  .user-pill {
+    position: absolute;
+    top: 64px;
+    right: 0;
+    display: flex;
+    align-items: center;
+    background: var(--card);
+    padding: 9px 12px 9px 14px;
+    border: 1px solid var(--ink);
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .user-pill label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin-right: 10px;
+  }
+  .user-pill input {
+    border: none;
+    background: transparent;
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 14, 'wght' 600;
+    font-size: 16px;
+    color: var(--ink);
+    width: 100px;
+    outline: none;
+  }
+  .user-pill input::placeholder { color: var(--ink-faded); font-style: italic; }
+
+  /* ============ Conversation ============ */
+  .conversation {
+    flex: 1;
+    padding: 44px 0 60px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+
+  /* 空状态：邀请,而不是装饰 */
+  .empty {
+    margin-top: 20px;
+    padding: 30px 32px 32px;
+    background: var(--card);
+    border-top: 3px solid var(--ink);
+    border-left: 1px solid var(--rule);
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .empty .label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin-bottom: 16px;
+  }
+  .empty h2 {
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 60, 'wght' 600;
+    font-size: 28px;
+    line-height: 1.25;
+    color: var(--ink);
+    margin-bottom: 6px;
+    letter-spacing: -0.01em;
+  }
+  .empty h2 em {
+    font-style: italic;
+    color: var(--accent);
+    font-variation-settings: 'opsz' 60, 'wght' 500;
+  }
+  .empty .suggestions {
+    margin-top: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .suggestions button {
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed var(--rule);
+    padding: 10px 0;
+    font-family: inherit;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: pointer;
+    transition: color 120ms, border-color 120ms, padding-left 160ms;
+  }
+  .suggestions button:hover {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    padding-left: 6px;
+  }
+  .suggestions button::before {
+    content: '→  ';
+    color: var(--ink-faded);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* 用户的话：右对齐,无衬线,右边一条墨条 */
+  .turn-user {
+    align-self: flex-end;
+    max-width: 78%;
+    text-align: right;
+  }
+  .turn-user .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin-bottom: 8px;
+  }
+  .turn-user .body {
+    display: inline-block;
+    text-align: left;
+    font-size: 16px;
+    line-height: 1.55;
+    color: var(--ink);
+    padding: 2px 16px 2px 0;
+    border-right: 2px solid var(--ink);
+  }
+
+  /* 店主的话：左对齐,衬线斜体,有一段横线作为"开口的小动作" */
+  .turn-agent {
+    align-self: flex-start;
+    max-width: 90%;
+  }
+  .turn-agent .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .turn-agent .meta::before {
+    content: '';
+    display: inline-block;
+    width: 22px;
+    height: 1px;
+    background: var(--ink-faded);
+  }
+  .turn-agent .body {
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 36, 'wght' 450;
+    font-style: italic;
+    font-size: 22px;
+    line-height: 1.45;
+    color: var(--ink);
+    letter-spacing: -0.005em;
+    white-space: pre-wrap;
+  }
+
+  /* 等待状态:翻看货架 */
+  .turn-loading .body {
+    font-family: 'JetBrains Mono', monospace;
+    font-style: normal;
+    font-size: 13px;
+    color: var(--ink-soft);
+    letter-spacing: 0.04em;
+  }
+  .dots::after {
+    content: '·';
+    animation: dots 1.5s steps(4, end) infinite;
+    letter-spacing: 0.4em;
+    margin-left: 0.3em;
+  }
+  @keyframes dots {
+    0%   { content: '·'; }
+    25%  { content: '· ·'; }
+    50%  { content: '· · ·'; }
+    75%  { content: '· · · ·'; }
+    100% { content: '·'; }
+  }
+
+  /* 错误:不是道歉,是诊断 */
+  .turn-error {
+    align-self: stretch;
+    padding: 14px 18px;
+    background: rgba(200,67,26,0.06);
+    border-left: 3px solid var(--accent);
+    color: var(--accent-deep);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .turn-error strong {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+
+  /* ============ Composer ============ */
+  .composer {
+    position: sticky;
+    bottom: 0;
+    background: linear-gradient(to bottom, transparent 0, var(--paper) 28px);
+    padding: 28px 0 24px;
+    z-index: 2;
+  }
+  .composer-shell {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--ink);
+    box-shadow: 4px 4px 0 var(--ink);
+  }
+
+  /* 文本区:画着横格线的写字板 */
+  textarea {
+    width: 100%;
+    min-height: 92px;
+    max-height: 220px;
+    resize: none;
+    border: none;
+    background-color: var(--card);
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 27px,
+      rgba(31,26,20,0.09) 27px,
+      rgba(31,26,20,0.09) 28px
+    );
+    background-position: 0 18px;
+    padding: 18px 130px 18px 22px;
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 28px;
+    color: var(--ink);
+    outline: none;
+    display: block;
+  }
+  textarea::placeholder {
+    color: var(--ink-faded);
+    font-style: italic;
+  }
+  textarea:disabled { cursor: not-allowed; opacity: 0.7; }
+
+  .send {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    background: var(--accent);
+    color: var(--card);
+    border: none;
+    padding: 13px 24px;
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 14, 'wght' 600;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: background 100ms, transform 60ms, box-shadow 60ms;
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .send:hover { background: var(--accent-deep); }
+  .send:active {
+    transform: translate(3px, 3px);
+    box-shadow: 0 0 0 var(--ink);
+  }
+  .send:disabled {
+    background: var(--card-deep);
+    color: var(--ink-faded);
+    box-shadow: 3px 3px 0 var(--rule);
+    cursor: not-allowed;
+  }
+
+  .composer-hint {
+    margin-top: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .composer-hint kbd {
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    padding: 1px 6px;
+    font-size: 10px;
+    color: var(--ink);
+  }
+
+  /* 响应式 */
+  @media (max-width: 600px) {
+    #app { padding: 0 18px; }
+    header { padding-top: 42px; }
+    .shop-name { font-size: 44px; }
+    .user-pill {
+      position: static;
+      margin-top: 20px;
+      display: inline-flex;
+    }
+    .turn-agent .body { font-size: 18px; }
+    .empty h2 { font-size: 22px; }
+    .composer-hint { flex-direction: column; gap: 6px; }
+    textarea { padding-right: 22px; }
+    .send { position: static; width: 100%; margin: 12px 0 0; box-shadow: 3px 3px 0 var(--ink); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1 class="shop-name">店面<em>·</em><span class="alt">Desk</span></h1>
+    <div class="shop-eyebrow">
+      <span class="dot"></span>
+      <span>客服在班 · clerk on duty</span>
+    </div>
+    <label class="user-pill">
+      <span>签到</span>
+      <input v-model="userId" placeholder="alice" maxlength="24" autocomplete="off" spellcheck="false">
+    </label>
+  </header>
+
+  <main class="conversation" ref="conv">
+    <div class="empty" v-if="turns.length === 0 && !loading">
+      <div class="label">还没有对话 · No exchange yet</div>
+      <h2>什么都还没说呢。<br>问问看店主<em>——</em></h2>
+      <div class="suggestions">
+        <button @click="sendQuick('airmax 42 码有货吗？')">airmax 42 码有货吗？</button>
+        <button @click="sendQuick('我 175cm 65kg，鞋穿几码？')">我 175cm 65kg，鞋穿几码？</button>
+        <button @click="sendQuick('帮我下一单 airmax 42 码')">帮我下一单 airmax 42 码</button>
+        <button @click="sendQuick('我的尺码记一下：42')">让店主记下我的尺码：42</button>
+      </div>
+    </div>
+
+    <template v-for="(t, i) in turns" :key="i">
+      <div v-if="t.role === 'user'" class="turn-user">
+        <div class="meta">你 · {{ t.time }}</div>
+        <div class="body">{{ t.text }}</div>
+      </div>
+      <div v-else-if="t.role === 'agent'" class="turn-agent">
+        <div class="meta">店主 · clerk · {{ t.time }}</div>
+        <div class="body">{{ t.text }}</div>
+      </div>
+      <div v-else-if="t.role === 'error'" class="turn-error">
+        <strong>线断了 · network error</strong>
+        {{ t.text }}
+      </div>
+    </template>
+
+    <div v-if="loading" class="turn-agent turn-loading">
+      <div class="meta">店主 · {{ now }}</div>
+      <div class="body">正在翻看货架<span class="dots"></span></div>
+    </div>
+  </main>
+
+  <div class="composer">
+    <div class="composer-shell">
+      <textarea
+        v-model="draft"
+        :placeholder="userId.trim() ? '想问点什么？' : '先在右上角签到，再来说话。'"
+        @keydown.enter.exact.prevent="send"
+        :disabled="!userId.trim() || loading"
+        rows="3"
+      ></textarea>
+      <button class="send" @click="send" :disabled="!canSend">送出</button>
+    </div>
+    <div class="composer-hint">
+      <span>{{ apiUrl }}</span>
+      <span><kbd>Enter</kbd> 送出&nbsp;·&nbsp;<kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref, computed, nextTick } = Vue;
+
+createApp({
+  setup() {
+    const apiUrl = 'http://localhost:8000/chat';
+    const userId  = ref(localStorage.getItem('shop_uid') || '');
+    const draft   = ref('');
+    const turns   = ref([]);
+    const loading = ref(false);
+    const now     = ref(stamp());
+
+    function stamp() {
+      const d = new Date();
+      return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    }
+
+    const canSend = computed(() =>
+      userId.value.trim() && draft.value.trim() && !loading.value
+    );
+
+    function scrollDown() {
+      nextTick(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
+    }
+
+    async function send() {
+      if (!canSend.value) return;
+      const text = draft.value.trim();
+      const uid  = userId.value.trim();
+      draft.value = '';
+      localStorage.setItem('shop_uid', uid);
+      turns.value.push({ role: 'user', text, time: stamp() });
+      loading.value = true;
+      now.value = stamp();
+      scrollDown();
+      try {
+        const r = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: uid, message: text }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
+        const data = await r.json();
+        turns.value.push({ role: 'agent', text: data.reply || '(店主沉默)', time: stamp() });
+      } catch (e) {
+        turns.value.push({ role: 'error', text: (e && e.message) ? e.message : String(e) });
+      } finally {
+        loading.value = false;
+        scrollDown();
+      }
+    }
+
+    function sendQuick(text) {
+      if (!userId.value.trim()) {
+        const el = document.querySelector('.user-pill input');
+        if (el) el.focus();
+        return;
+      }
+      draft.value = text;
+      send();
+    }
+
+    return { apiUrl, userId, draft, turns, loading, now, canSend, send, sendQuick };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
