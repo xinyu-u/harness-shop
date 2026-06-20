@@ -13,6 +13,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 import jwt
@@ -113,6 +114,18 @@ class ChatResponse(BaseModel):
     reply: str
 
 
+class ConfirmResponse(BaseModel):
+    order_id: int
+    status: str
+    message: str
+
+
+class CancelResponse(BaseModel):
+    order_id: int
+    status: str
+    message: str
+
+
 TOOL_PROGRESS_TEXT: dict[str, tuple[str, str]] = {
     "search_products": ("正在找商品…", "找到了相关商品"),
     "check_stock": ("正在查库存…", "查到了库存"),
@@ -130,6 +143,16 @@ def _assistant_text(event: AssistantTurnComplete) -> str:
     return "".join(
         b.text for b in event.message.content if isinstance(b, TextBlock)
     )
+
+
+# place_order 工具的输出格式固定（"已生成待确认订单 #7：…"），#后是 draft_id。
+# 从这条确定性输出抠 id，比解析 LLM 自由回复可靠（回复会被模型改写）。
+_DRAFT_ID_RE = re.compile(r"#(\d+)")
+
+
+def _extract_draft_id(place_order_output: str) -> int | None:
+    m = _DRAFT_ID_RE.search(place_order_output)
+    return int(m.group(1)) if m else None
 
 
 def _tool_status(tool_name: str, phase: str, is_error: bool = False) -> str:
@@ -200,14 +223,13 @@ def login(req: AuthRequest):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, authorization: str | None = Header(default=None)):
+    """非流式入口:用于 curl 调试或外部脚本。前端走 /chat/stream。"""
     user_id, role = _auth(authorization)
     engine = get_engine(user_id, role)
     reply_text = ""
     async for event in engine.submit_message(req.message):
         if isinstance(event, AssistantTurnComplete):
-            reply_text = "".join(
-                b.text for b in event.message.content if isinstance(b, TextBlock)
-            )
+            reply_text = _assistant_text(event)
     return ChatResponse(reply=reply_text)
 
 
@@ -218,6 +240,8 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(defau
 
     async def generate():
         yield _event_line("status", text="正在理解你的需求…", busy=True)
+        # 这一轮里若成功建了草稿，记下 draft_id，最后随 final 事件透出给前端
+        draft_id: int | None = None
         try:
             async for event in engine.submit_message(req.message):
                 if isinstance(event, ToolExecutionStarted):
@@ -229,6 +253,10 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(defau
                         busy=True,
                     )
                 elif isinstance(event, ToolExecutionCompleted):
+                    if event.tool_name == "place_order" and not event.is_error:
+                        got = _extract_draft_id(event.output)
+                        if got is not None:
+                            draft_id = got   # 多次下单取最后一张草稿
                     yield _event_line(
                         "status",
                         text=_tool_status(event.tool_name, "completed", event.is_error),
@@ -238,11 +266,53 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(defau
                         busy=False,
                     )
                 elif isinstance(event, AssistantTurnComplete):
-                    yield _event_line("final", reply=_assistant_text(event))
+                    yield _event_line("final", reply=_assistant_text(event), draft_id=draft_id)
         except Exception as e:
             yield _event_line("error", message=str(e))
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@app.post("/orders/{draft_id}/confirm", response_model=ConfirmResponse)
+def confirm_order(draft_id: int, authorization: str | None = Header(default=None)):
+    """确认草稿订单 —— A 方案的安全核心。
+
+    这条路径**不经过 agent**，是用户独立发起的操作：
+      1. 必须带合法 token（_auth 校验登录）
+      2. confirm_draft_order 校验归属（只能确认自己的草稿）+ 没过期 + 幂等
+      3. 真正扣库存只在这里发生——模型不听话直接调 place_order 也只是建草稿，
+         绕过前端 curl 也得过这道 token+归属 校验，绕不过去。
+    """
+    user_id, _ = _auth(authorization)   # 确认只看"是谁"，不看角色
+    order, err = store.confirm_draft_order(draft_id, user_id)
+    if err is not None:
+        # 归属不符 / 不存在 / 已过期 / 已取消 都归为 400（不暴露具体哪种，减少探测面）
+        raise HTTPException(status_code=400, detail=err)
+    return ConfirmResponse(order_id=order["id"], status=order["status"], message="下单成功")
+
+
+@app.post("/orders/{draft_id}/cancel", response_model=CancelResponse)
+def cancel_order(draft_id: int, authorization: str | None = Header(default=None)):
+    """取消订单 —— 与 confirm 对称的独立操作，同样不经过 agent。
+
+    store.cancel_order 不带归属校验（它也给 CLI 工具用），所以归属在这里把关：
+    fetch 出来比对 user_id，只能取消自己的单——漏了这步别人就能取消你的单。
+    """
+    user_id, _ = _auth(authorization)
+    order = store.get_order(draft_id)
+    if order is None:
+        raise HTTPException(status_code=400, detail="订单不存在")
+    if order["user_id"] != user_id:
+        raise HTTPException(status_code=400, detail="无权取消此订单")
+    # 幂等：已取消的单重试直接返回成功（不二次释放预占）。
+    # 顺序关键——必须在归属校验之后，否则别人的已取消单也会被幂等返回成功、泄露其存在。
+    if order["status"] == "cancelled":
+        return CancelResponse(order_id=order["id"], status="cancelled", message="已取消")
+    if not store.cancel_order(draft_id):
+        # 已取消等无法再取消的情况
+        raise HTTPException(status_code=400, detail="订单无法取消")
+    cancelled = store.get_order(draft_id)
+    return CancelResponse(order_id=cancelled["id"], status=cancelled["status"], message="已取消")
 
 
 # ------------- 前端静态文件 -------------

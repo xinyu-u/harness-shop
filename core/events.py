@@ -29,7 +29,3 @@ class ToolExecutionCompleted:
     output: str
     is_error: bool = False
 
-
-# TODO 阶段3：加 ErrorEvent（错误回退时用）、StatusEvent（状态提示）
-# TODO 阶段4：加 CompactProgressEvent（压缩进度，可选）
-# TODO 阶段5：加 PermissionPromptEvent（权限确认，可选）

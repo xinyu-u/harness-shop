@@ -44,10 +44,13 @@ async def run_query(config: RunConfig, messages: list[ConversationMessage]):
                 messages, tool_schemas, system_prompt=config.system_prompt
             )
         except Exception as e:
-            yield AssistantTurnComplete(
-                message=ConversationMessage(role="assistant",
-                    content=[TextBlock(text=f"（模型调用失败：{e}）")])
-            )
+            msg = str(e).lower()
+            if any(k in msg for k in ("connect", "timeout", "network")):
+                text = "网络好像不太稳定，请稍后重试。"
+            else:
+                text = "服务暂时出了点问题，请稍后重试。"
+            yield AssistantTurnComplete(message=ConversationMessage(role="assistant",
+                content=[TextBlock(text=text)]))
             return
         messages.append(reply)
 

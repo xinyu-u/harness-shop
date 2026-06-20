@@ -453,6 +453,78 @@
     margin-bottom: 4px;
   }
 
+  /* ============ 下单确认 / 取消按钮（草稿 → 确认 / 取消）============ */
+  .order-confirm {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
+  }
+  .order-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .order-btn {
+    background: var(--accent);
+    color: var(--card);
+    border: none;
+    padding: 11px 22px;
+    font-family: 'Fraunces', 'Noto Serif SC', serif;
+    font-variation-settings: 'opsz' 14, 'wght' 600;
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    box-shadow: 3px 3px 0 var(--ink);
+    transition: background 100ms, transform 60ms, box-shadow 60ms;
+  }
+  .order-btn:hover { background: var(--accent-deep); }
+  .order-btn:active { transform: translate(3px, 3px); box-shadow: 0 0 0 var(--ink); }
+  .order-btn:disabled {
+    background: var(--card-deep);
+    color: var(--ink-faded);
+    box-shadow: 3px 3px 0 var(--rule);
+    cursor: not-allowed;
+  }
+  /* 取消是次要操作：描边而非实心，视觉上从属于"确认" */
+  .order-btn.ghost {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    padding: 10px 21px;
+  }
+  .order-btn.ghost:hover { background: var(--card-deep); }
+  .order-btn.ghost:disabled {
+    background: transparent;
+    color: var(--ink-faded);
+    border-color: var(--rule);
+    box-shadow: 3px 3px 0 var(--rule);
+  }
+  .order-msg {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    line-height: 1.5;
+    padding: 8px 12px;
+    border-left: 3px solid var(--rule);
+  }
+  .order-msg.ok {
+    color: var(--success);
+    border-left-color: var(--success);
+    background: rgba(61,82,52,0.06);
+  }
+  .order-msg.bad {
+    color: var(--accent-deep);
+    border-left-color: var(--accent);
+    background: rgba(200,67,26,0.06);
+  }
+  .order-msg.muted {
+    color: var(--ink-soft);
+    border-left-color: var(--ink-faded);
+    background: rgba(31,26,20,0.04);
+  }
+
   .composer {
     position: sticky;
     bottom: 0;
@@ -598,6 +670,9 @@
         <button class="auth-tab" :class="{ active: mode === 'register' }" @click="switchMode('register')">注册</button>
       </div>
 
+      <!-- 错误提示放卡片顶部:401 过期被踢回登录时也走这里,用户一打开就看见 -->
+      <div v-if="authError" class="auth-error">{{ authError }}</div>
+
       <form @submit.prevent="submitAuth">
         <div class="field">
           <label>账号</label>
@@ -610,10 +685,9 @@
         <button class="auth-submit" type="submit" :disabled="!canSubmitAuth || authLoading">
           {{ authLoading ? '正在...' : (mode === 'login' ? '签到进店' : '注册并进店') }}
         </button>
-        <div v-if="authError" class="auth-error">{{ authError }}</div>
         <div class="auth-hint">
           注册自动建普通用户。<br>
-          商家账号由店主用 seed_merchant.py 在数据库直接种。
+          商家账号由店主在 .env 配 merchant_user/merchant_password,启动时自动种。
         </div>
       </form>
     </div>
@@ -646,6 +720,38 @@
           <div class="meta">{{ auth.role === 'merchant' ? '助手 · merchant assistant' : '店主 · clerk' }} · {{ t.time }}</div>
           <div class="body">
             {{ t.text }}<span v-if="t.pending && t.busy !== false" class="dots"></span>
+          </div>
+          <!-- agent 建了草稿（带 draft_id）→ 用户独立点"确认"才真正下单、"取消"则释放预占 -->
+          <div v-if="t.draftId" class="order-confirm">
+            <!-- 终态（done/cancelled）后两个按钮都消失：不能再确认/取消已了结的单 -->
+            <div
+              v-if="t.orderState !== 'done' && t.orderState !== 'cancelled'"
+              class="order-actions"
+            >
+              <button
+                class="order-btn"
+                :disabled="t.orderState === 'confirming' || t.orderState === 'cancelling'"
+                @click="confirmOrder(t)"
+              >
+                {{ t.orderState === 'confirming' ? '确认中…' : '确认下单 #' + t.draftId }}
+              </button>
+              <button
+                class="order-btn ghost"
+                :disabled="t.orderState === 'confirming' || t.orderState === 'cancelling'"
+                @click="cancelOrder(t)"
+              >
+                {{ t.orderState === 'cancelling' ? '取消中…' : '取消' }}
+              </button>
+            </div>
+            <div
+              v-if="t.orderMsg"
+              class="order-msg"
+              :class="{
+                ok: t.orderState === 'done',
+                bad: t.orderState === 'failed',
+                muted: t.orderState === 'cancelled',
+              }"
+            >{{ t.orderMsg }}</div>
           </div>
         </div>
         <div v-else-if="t.role === 'error'" class="turn-error">
@@ -781,6 +887,7 @@ createApp({
         if (i % 6 === 0) scrollDown();
         await sleep(14);
       }
+      scrollDown();
     }
 
     async function readStreamEvents(response, onEvent) {
@@ -824,6 +931,9 @@ createApp({
         time: stamp(),
         pending: true,
         busy: true,
+        draftId: null,        // 后端透出的草稿订单号；有值才显示"确认/取消"按钮
+        orderState: 'idle',   // idle | confirming | cancelling | done | cancelled | failed
+        orderMsg: '',
       };
       turns.value.push(assistantTurn);
       loading.value = true;
@@ -839,11 +949,12 @@ createApp({
           body: JSON.stringify({ message: text }),
         });
         if (r.status === 401) {
-          // token 过期/失效：清掉，回登录页
-          assistantTurn.role = 'error';
-          assistantTurn.text = '登录已过期，请重新签到。';
-          assistantTurn.pending = false;
+          // token 过期/失效：清掉,提示挂到登录卡片(不挂到对话气泡——气泡会随
+          // auth.token 失效一起被 v-else 切到登录视图,提示一闪即逝)
           clearAuth();
+          turns.value = [];   // 把刚 push 的 user turn 和 pending agent turn 一起清掉
+          mode.value = 'login';
+          authError.value = '登录已过期，请重新签到。';
           return;
         }
         if (!r.ok) {
@@ -851,6 +962,7 @@ createApp({
           throw new Error(data.detail || ('HTTP ' + r.status + ' ' + r.statusText));
         }
         let gotFinal = false;
+        let revealPromise = null;
         await readStreamEvents(r, async (event) => {
           if (event.type === 'status') {
             assistantTurn.pending = true;
@@ -861,7 +973,11 @@ createApp({
             gotFinal = true;
             assistantTurn.pending = false;
             assistantTurn.busy = false;
-            await revealReply(assistantTurn, event.reply);
+            // 这一轮建了草稿 → 记下 draft_id，模板据此显示"确认下单"按钮
+            if (event.draft_id) assistantTurn.draftId = event.draft_id;
+            // 不 await:让 reader 继续消费后续事件(若以后有的话)。
+            // typewriter 自己跑,完成后由 finally 等它收尾 loading 状态。
+            revealPromise = revealReply(assistantTurn, event.reply);
           } else if (event.type === 'error') {
             throw new Error(event.message || '流式响应失败');
           }
@@ -869,6 +985,8 @@ createApp({
         if (!gotFinal) {
           throw new Error('没有收到最终回复');
         }
+        // typewriter 跑完才解除 loading,期间 send 按钮保持禁用
+        if (revealPromise) await revealPromise;
       } catch (e) {
         assistantTurn.role = 'error';
         assistantTurn.text = (e && e.message) ? e.message : String(e);
@@ -885,10 +1003,80 @@ createApp({
       send();
     }
 
+    // 操作进行中（confirming/cancelling）或已了结（done/cancelled）就不再响应点击，
+    // 防重复触发。两个动作共用这一道闸。
+    function orderBusyOrDone(turn) {
+      return ['confirming', 'cancelling', 'done', 'cancelled'].includes(turn.orderState);
+    }
+
+    // 用户独立确认草稿订单：调绕不过的后端接口，真正扣库存只在这一步发生。
+    // 不经过 agent —— 模型/前端都改变不了"必须本人带 token 确认"这件事。
+    async function confirmOrder(turn) {
+      if (!turn.draftId || orderBusyOrDone(turn)) return;
+      turn.orderState = 'confirming';
+      turn.orderMsg = '';
+      try {
+        const r = await fetch(apiBase + '/orders/' + turn.draftId + '/confirm', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + auth.token },
+        });
+        if (r.status === 401) {
+          clearAuth();
+          turns.value = [];
+          mode.value = 'login';
+          authError.value = '登录已过期，请重新签到。';
+          return;
+        }
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          // 越权/不存在/已过期/已取消 → 后端统一 400，detail 里有原因
+          turn.orderState = 'failed';
+          turn.orderMsg = data.detail || ('HTTP ' + r.status);
+          return;
+        }
+        turn.orderState = 'done';
+        turn.orderMsg = '已确认 · 订单 #' + data.order_id + ' 已生效';
+      } catch (e) {
+        turn.orderState = 'failed';
+        turn.orderMsg = (e && e.message) ? e.message : String(e);
+      }
+    }
+
+    // 取消草稿/订单：与 confirm 对称，调 /orders/{id}/cancel（后端校验归属）。
+    async function cancelOrder(turn) {
+      if (!turn.draftId || orderBusyOrDone(turn)) return;
+      turn.orderState = 'cancelling';
+      turn.orderMsg = '';
+      try {
+        const r = await fetch(apiBase + '/orders/' + turn.draftId + '/cancel', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + auth.token },
+        });
+        if (r.status === 401) {
+          clearAuth();
+          turns.value = [];
+          mode.value = 'login';
+          authError.value = '登录已过期，请重新签到。';
+          return;
+        }
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          turn.orderState = 'failed';
+          turn.orderMsg = data.detail || ('HTTP ' + r.status);
+          return;
+        }
+        turn.orderState = 'cancelled';
+        turn.orderMsg = '已取消 · 订单 #' + data.order_id + ' 预占已释放';
+      } catch (e) {
+        turn.orderState = 'failed';
+        turn.orderMsg = (e && e.message) ? e.message : String(e);
+      }
+    }
+
     return {
       apiBase,
       auth, mode, form, authError, authLoading, canSubmitAuth, switchMode, submitAuth, logout,
-      draft, turns, loading, now, canSend, send, sendQuick,
+      draft, turns, loading, now, canSend, send, sendQuick, confirmOrder, cancelOrder,
     };
   }
 }).mount('#app');

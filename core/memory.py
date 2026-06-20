@@ -29,5 +29,3 @@ def append_memory(content: str, user_id: str = "default") -> None:
     with open(f"memory_{user_id}.md", "a", encoding="utf-8") as f:
         f.write(f"\n- {content}")
 
-# TODO 阶段6：写一个 WriteMemoryTool（business/cs_tools.py 里），
-#            让模型自己决定调它、自己概括内容，工具调 append_memory 存。

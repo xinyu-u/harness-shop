@@ -23,13 +23,16 @@
 
 ```
 frontend/index.html          单页 Vue：登录/注册 + 对话 UI，token 存 localStorage
-       │  POST /register · /login  →  JWT
-       │  POST /chat   Authorization: Bearer <token>   { message }
+       │  POST /register · /login        →  JWT
+       │  POST /chat/stream  Bearer <t>  →  NDJSON 流：status / final / error
+       │  POST /chat         Bearer <t>  →  一次性 JSON（curl 调试用，前端不走）
        ▼
 server.py                    FastAPI 外壳
                                · 启动时按 .env 种 merchant 账号
                                · /register 永远建 role='user'
                                · /chat 解 JWT 拿 (user_id, role) → 取/建 engine
+                               · /chat/stream 同上,把 engine 的事件流推给前端
+                               · /orders/{id}/confirm · /orders/{id}/cancel 独立确认/取消订单（不经 agent，校验归属，见"下单确认"）
                              sessions key = (user_id, role)，避免缓存串色
        ▼
 core/  ── harness 引擎（通用，与业务无关）
@@ -63,7 +66,7 @@ tests/                       FakeClient 驱动的单元/冒烟测试
 
 ---
 
-## 一次 `/chat` 发生了什么
+## 一次 `/chat/stream` 发生了什么
 
 1. **server.py** 从 `Authorization: Bearer <token>` 解 JWT 拿 `(user_id, role)`，
    按 `(user_id, role)` 找/建 `QueryEngine`，调 `submit_message(text)`。
@@ -77,9 +80,19 @@ tests/                       FakeClient 驱动的单元/冒烟测试
    - 有 tool_use → 对每个：**角色门禁兜底**（防瞎编工具名）→ pydantic 校验入参 →
      写操作过 `confirm` 回调 → 调 `tool.execute()` → 用 `ToolResultBlock` 配回
      `tool_use_id` 塞进 messages，继续下一轮。
-4. **server** 只收 `AssistantTurnComplete` 事件，把文本返给前端。CLI 还会打印工具执行事件。
+4. **server 边收边推**：把 engine yield 出来的事件即时翻成 NDJSON 一行行写出去——
+   - `ToolExecutionStarted` → `{"type":"status","text":"正在查库存…","tool_name":"...","busy":true}`
+   - `ToolExecutionCompleted` → 同上,phase=completed,带 `is_error`
+   - `AssistantTurnComplete` → `{"type":"final","reply":"..."}`
+   - 异常 → `{"type":"error","message":"..."}`
+5. **前端 fetch + ReadableStream + NDJSON** 逐行读：status 事件原地刷气泡文案,
+   final 事件触发逐字呈现回复。同一个 assistant 气泡贯穿整轮,不抖。
 
 事件流而不是 print：循环只负责"发生了什么"，外壳（CLI / FastAPI / 前端）自己决定怎么显示。
+这就是为什么把"丢掉的中间事件捡起来"只动了 server 30 行、engine 一行没改。
+
+> 还有一个 **`POST /chat`**（非流式）端点保留作 curl 调试用——发一次拿一次 JSON,不需要
+> 处理 NDJSON 拆行。前端不走这条路径。
 
 ---
 
@@ -91,7 +104,7 @@ tests/                       FakeClient 驱动的单元/冒烟测试
 | `check_stock` | A 只读 | all | 查某商品某尺码库存 |
 | `recommend_size` | A 只读 | all | 按身高/体重/品类查尺码表 |
 | `get_order_status` | A 只读 | all | 按订单号查状态 |
-| `place_order` | **B 写** | all | 下单（`UPDATE qty - ? WHERE qty >= ?` 防超卖，`request_id` 唯一索引兜底幂等） |
+| `place_order` | **B 写** | all | **发起下单**：建待确认草稿 + 预占库存（`locked+qty`），返回 draft_id；不真扣款，真正生效靠独立确认接口（见"下单确认"一节） |
 | `cancel_order` | **B 写** | all | 取消订单 + 退回库存 |
 | `write_memory` | A 只读 | all | 模型自己决定要不要把"用户穿42码"这类跨会话信息追加到 `memory_{uid}.md` |
 | `update_price` | **B 写** | **merchant** | 改商品价格 |
@@ -110,9 +123,15 @@ tests/                       FakeClient 驱动的单元/冒烟测试
 
 - **MemoryStore**：进程内字典，启动即用，演示/测试用。
 - **SqliteStore**（`shop.db`）：服务跑的就是它。`products / inventory / size_chart / orders / users` 五张表。
+  - `inventory.locked`：预占量，`available = qty - locked`。建草稿 `locked+qty`（锁货不扣货）；
+    确认 `qty-qty, locked-qty`（预占转真扣）；过期 / 取消 pending 草稿 `locked-qty`（释放预占）；
+    取消 created/confirmed 订单 `qty+qty`（退回真库存）。`check_stock` 返回 available。
+    ⚠️ 取消必须按订单状态退回正确的"位置"——草稿在 locked、已扣单在 qty，退错地方会让账目凭空增减。
+  - `orders.status`：`pending`（草稿，已预占）/ `confirmed`（已确认真扣）/ `cancelled`（取消或过期释放）/
+    `created`（路径A 直接下单的终态）；`orders.expires_at`：草稿过期时间戳。
   - `orders.request_id` 唯一索引：客户端重发同一个 `request_id` 只会有一条订单（幂等）。
-  - 下单用 `UPDATE inventory SET qty = qty - ? WHERE ... AND qty >= ?` + `rowcount` 判断：
-    检查与扣减合并为一条原子 SQL，靠数据库行锁防并发超卖；扣库存 + 插订单包在事务里，失败回滚。
+  - 防超卖靠一条原子 SQL + `rowcount` 判断：路径A `UPDATE qty=qty-? WHERE ... AND qty>=?`，
+    路径B 预占 `UPDATE locked=locked+? WHERE ... AND qty-locked>=?`；靠数据库行锁防并发超卖，事务里失败回滚。
   - `users.user_id` 是 PK，写入前统一 `lower()` —— 注册和登录走同一规则，避免 `Alice/alice` 分裂。
   - `check_same_thread=False`：FastAPI 多线程下 sqlite3 必须开。
 
@@ -131,19 +150,47 @@ tests/                       FakeClient 驱动的单元/冒烟测试
 
 ---
 
-## 下单确认：机制与落地状态
+## 下单确认：把"危险的一步操作"拆成"安全的多步状态机"
 
-"写操作需确认"是本项目的核心安全机制，落地分两条路径：
+下单是不可逆写操作，控制它有两套机制，分别服务两种入口：
 
-- **CLI（已完整接入）**：`run_query` 执行写操作前调 `confirm` 回调，`main.py` 的 `cli_confirm`
-  用 `input()` 问 y/n，拒绝则把"用户取消"作为 tool_result 塞回。**确认机制在 CLI 下完整可演示。**
-- **HTTP（机制就绪，未接前端交互）**：HTTP 是一次请求一次响应，没法像 CLI 那样在请求中途阻塞等用户敲键。
-  完整落地需要把 `ToolExecutionStarted` 推给前端、前端按钮回写确认、`run_query` 暂停等待 ——
-  即把"事件流"从单向 yield 改成双向。这是已规划的下一步，机制（confirm 回调注入）已就位，
-  接的是交互方式。
+### 机制一 · 引擎级 confirm 回调（CLI）
 
-> 设计上 confirm 是注入到 `run_query` 的回调，引擎不耦合具体交互方式 —— 这正是 CLI 用 input、
-> HTTP 改两步式时，引擎一行不用改的原因。
+`run_query` 执行 `is_write` 工具前调 `confirm` 回调，`main.py` 的 `cli_confirm` 用 `input()`
+问 y/n，拒绝则把"用户取消"作为 tool_result 塞回。confirm 注入到引擎、不耦合具体交互方式。
+**HTTP 路径建 engine 时不传 confirm（`config.confirm is None`），所以这套在 web 流里不触发** ——
+web 的安全由机制二兜底。
+
+### 机制二 · 草稿确认状态机（HTTP，本项目主用）
+
+把"下单"从**一个动作**（扣库存+建单，不可逆）改造成**一个状态机**：
+
+```
+pending(预占 locked+qty) ──confirm──▶ confirmed(真扣 qty、释放 locked)
+                         └─expire──▶ cancelled(释放 locked)
+```
+
+每个状态转移独立、可校验、可回滚。它分三层落地，状态全在数据库、请求间无状态：
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| **数据层** | `business/store.py` | `inventory.locked` + `orders.expires_at` + 三方法：`create_draft_order`（原子预占 `UPDATE locked=locked+? WHERE qty-locked>=?` + 建 pending + 记过期）、`confirm_draft_order`（校验归属+没过期+幂等 → 预占转真扣）、`release_expired_orders`（过期释放预占+置 cancelled，被 `check_stock`/`confirm` 惰性调用，不起后台任务） |
+| **工具层** | `place_order`（`cs_tools.py`） | agent 只负责**发起**：调 `create_draft_order` 建草稿、返回 draft_id + 待确认提示。agent 碰不到"真扣款"那一步 |
+| **接口层** | `POST /orders/{id}/confirm` · `POST /orders/{id}/cancel`（`server.py`） | **不经过 agent** 的独立操作，二者对称。confirm 走 `confirm_draft_order`（归属+幂等在 store）；cancel 在端点 fetch 出来比对 `user_id`（store.cancel_order 不带归属，还给 CLI 用）→ `cancel_order`。归属/不存在 → 400；幂等重试（已确认 / 已取消）→ 200 成功。**幂等判断都放在归属校验之后**，否则会幂等返回成功、泄露别人单的存在 |
+| **前端层** | `frontend/index.html` | agent 回复带 `draft_id` 时显示"确认下单 / 取消"两个按钮，点击调对应接口；`orderState`（idle→confirming/cancelling→done/cancelled/failed）管按钮显隐，终态后两键消失、处理中禁用防重复点。`draft_id` 由 server 从 `place_order` 的确定性输出抠出、随 `final` 事件透出（不解析 LLM 自由回复） |
+
+**为什么接口层是安全核心**：真正生效（扣库存）只能通过这条绕不过的后端接口 ——
+- 模型不听话直接调 `place_order`？没用，只建草稿（pending），不确认就不扣；
+- 绕过前端 `curl`？也得带 token、也只能确认自己的草稿、也走同一套后端校验。
+
+> 测试见 `tests/test_draft_order.py`（数据层 7 项）+ `tests/test_confirm_flow.py`（工具+接口 7 项），
+> 覆盖：建草稿 available 减 / 确认 qty 真减 / 过期还原 / 越权确认被拒 / 重复确认幂等。
+
+### 两条下单路径并存（设计决策，非遗漏）
+
+`store` 里 `create_order`（**路径A**，一步直接扣库存建 `created` 订单）和上面的草稿状态机
+（**路径B**）并存。`place_order` 已切到路径B，路径A 没人在 web 流里调，**有意保留**作为
+"一步动作 vs 状态机"的对照基准 —— 删了会让两种模型的差异看不见，且留着不碍事。新功能一律走路径B。
 
 ---
 
@@ -175,11 +222,17 @@ chat 自动加 `Authorization: Bearer ...`；401 自动登出。
 
 **已跑通**：harness 循环、工具调用、SQLite 持久化、上下文压缩、跨会话记忆、HTTP + 前端、
 幂等下单、防超卖事务、bcrypt + JWT 认证、role 门禁（schema 过滤 + 执行兜底）、商家工具、
-env-seeded 商家账号。
+env-seeded 商家账号、`/chat/stream` 单向事件流（NDJSON）+ 前端工具进度文案 + 逐字回复、
+**草稿确认状态机全链路（预占库存 + place_order 建草稿 + 独立确认接口 `/orders/{id}/confirm`
++ server 透出 draft_id + 前端"确认下单"按钮，四层贯通，见"下单确认"一节）**。
 
 **接下来（按价值排）：**
-- **HTTP 下单两步式确认**：把核心安全机制搬上界面（机制已就绪，见上节）。
+- **工具并行执行**：同一回合里模型发出的多个 tool_use 当前是 `for` 循环串行 await,
+  独立工具本可 `asyncio.gather`。改完前端进度区从"一行文案"扩成"活动列表"。
+- **草稿过期的后台清理**：当前过期靠 `check_stock`/`confirm` 惰性触发 `release_expired_orders`；
+  没人查库存的冷门 SKU 草稿会"悬挂"占着预占。规模化时补一个定时任务兜底（demo 惰性够用）。
 - **`add_inventory` 工具**：让商家上架的新品能配库存、真正可卖（当前 `add_product` 不动 inventory）。
+  顺便把进度文案搬到 BaseTool 属性上（`progress_started/completed`），server.py 解耦工具语义。
 - 连接池：当前单连接 + 单元逻辑串行，幂等的并发兜底（唯一索引）已为多连接准备；规模化时换连接池。
 - `sessions` 加 TTL / LRU：当前无上限，在线人数级 demo 够用，规模化要进程外存。
 

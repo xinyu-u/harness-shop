@@ -142,7 +142,10 @@ class PlaceOrderInput(BaseModel):
 
 class PlaceOrderTool(BaseTool):
     name = "place_order"
-    description = "下单购买商品。这是不可逆操作。"
+    description = (
+        "发起下单：生成一张待确认订单（草稿）并预占库存，不会真正扣款。"
+        "返回的订单号需由用户在确认接口里确认后才真正生效，未确认会自动过期释放。"
+    )
     input_model = PlaceOrderInput
     is_write = True
 
@@ -151,8 +154,10 @@ class PlaceOrderTool(BaseTool):
         self._user_id = user_id
 
     async def execute(self, arguments: PlaceOrderInput) -> ToolResult:
+        # agent 只负责"发起"：建草稿 + 预占库存，不执行不可逆的真扣款。
+        # 真正生效（扣库存）由独立的后端确认接口完成——模型/工具碰不到那一步。
         try:
-            order = self._store.create_order(
+            draft = self._store.create_draft_order(
                 arguments.product_id, arguments.size, arguments.qty, user_id=self._user_id
             )
         except ValueError as e:
@@ -160,7 +165,13 @@ class PlaceOrderTool(BaseTool):
             return ToolResult(output=f"下单失败：{e}", is_error=True)
         except Exception as e:
             return ToolResult(output=f"下单失败：{e}", is_error=True)
-        return ToolResult(output=f"下单成功！订单号 {order['id']}")
+        return ToolResult(
+            output=(
+                f"已生成待确认订单 #{draft['id']}："
+                f"{arguments.product_id} {arguments.size}码 ×{arguments.qty}，"
+                f"请在15分钟内确认。订单号：{draft['id']}"
+            )
+        )
 
 
 # ============ B类：cancel_order（写操作，阶段5需确认）============
