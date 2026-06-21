@@ -127,6 +127,10 @@ class QueryEngine:
         self._config.system_prompt = (
             "你是电商客服助手，帮用户查商品、查库存、推荐尺码、下单。"
             + role_hint
+            + "\n\n# 实时数据规则\n"
+              "价格、库存、订单状态都是会随时变化的实时数据。每当用户问到这些，"
+              "必须重新调用对应工具查询，绝不能拿对话历史里出现过的旧数值直接回答"
+              "——那些随时可能已经被改过、过时了。"
             + (f"\n\n# 你记得的用户信息\n{memory}\n" if memory else "")
         )
         self._messages.append(
