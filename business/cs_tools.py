@@ -29,7 +29,11 @@ class SearchProductsInput(BaseModel):
 
 class SearchProductsTool(BaseTool):
     name = "search_products"
-    description = "按关键词搜索商品，返回匹配的商品列表。"
+    description = (
+        "按关键词搜索【有哪些商品】，返回商品列表（名称/价格/品类）。"
+        "用于'有没有X''卖什么'这类问题。"
+        "查某商品某尺码的具体库存数量，请改用 check_stock。"
+    )
     input_model = SearchProductsInput
     is_write = False
 
@@ -56,7 +60,10 @@ class CheckStockInput(BaseModel):
 
 class CheckStockTool(BaseTool):
     name = "check_stock"
-    description = "查询某商品某尺码的库存数量。"
+    description = (
+        "查询【某个具体商品某个尺码的库存数量】，如'airmax 42码还有几件'。"
+        "只是想知道有哪些商品、卖什么，请改用 search_products。"
+    )
     input_model = CheckStockInput
     is_write = False
 
@@ -143,8 +150,9 @@ class PlaceOrderInput(BaseModel):
 class PlaceOrderTool(BaseTool):
     name = "place_order"
     description = (
-        "发起下单：生成一张待确认订单（草稿）并预占库存，不会真正扣款。"
-        "返回的订单号需由用户在确认接口里确认后才真正生效，未确认会自动过期释放。"
+        "发起下单：用户【购买】商品时使用，生成待确认订单并预占库存，不会真正扣款。"
+        "返回的订单号需用户在确认接口确认后才真正生效，未确认会自动过期释放。"
+        "仅用于用户购买，不要用于商家新增商品或增加库存。"
     )
     input_model = PlaceOrderInput
     is_write = True
@@ -182,7 +190,10 @@ class CancelOrderInput(BaseModel):
 
 class CancelOrderTool(BaseTool):
     name = "cancel_order"
-    description = "取消订单。这会改变订单状态并退回库存。"
+    description = (
+        "取消【已存在的订单】，会改变订单状态并退回库存/释放预占。"
+        "用于用户明确要取消某张订单时。下新单请用 place_order。"
+    )
     input_model = CancelOrderInput
     is_write = True
 
@@ -208,7 +219,10 @@ class UpdatePriceInput(BaseModel):
 
 class UpdatePriceTool(BaseTool):
     name = "update_price"
-    description = "修改商品价格。仅商家可用。"
+    description = (
+        "修改【已存在商品】的价格（仅商家）。"
+        "用于'把airmax改成500'这类改价。新增一个还不存在的商品请用 add_product。"
+    )
     input_model = UpdatePriceInput
     is_write = True
     allowed_roles = {"merchant"}
@@ -237,7 +251,11 @@ class AddProductInput(BaseModel):
 
 class AddProductTool(BaseTool):
     name = "add_product"
-    description = "新增商品（不含初始库存）。仅商家可用。"
+    description = (
+        "商家【新增商品品类】时使用（仅商家）。只创建一条新商品记录，"
+        "不含库存、不涉及购买。"
+        "不要用于用户下单购买（那用 place_order），也不要用于增加现有商品的库存数量。"
+    )
     input_model = AddProductInput
     is_write = True
     allowed_roles = {"merchant"}
