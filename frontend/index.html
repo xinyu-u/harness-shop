@@ -781,7 +781,7 @@
 </div>
 
 <script>
-const { createApp, ref, reactive, computed, nextTick } = Vue;
+const { createApp, ref, reactive, computed, nextTick, onMounted } = Vue;
 
 createApp({
   setup() {
@@ -842,6 +842,7 @@ createApp({
         saveAuth();
         form.password = '';
         turns.value = [];   // 切账号清旧对话
+        await loadInitialHistory();   // 拉这个账号的聊天档案
       } catch (e) {
         authError.value = e.message || String(e);
       } finally {
@@ -859,6 +860,7 @@ createApp({
     const turns   = ref([]);
     const loading = ref(false);
     const now     = ref(stamp());
+    let noMoreHistory = false;   // 历史拉到头的标记（步骤4 上拉加载用）
 
     function stamp() {
       const d = new Date();
@@ -871,6 +873,83 @@ createApp({
 
     function scrollDown() {
       nextTick(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
+    }
+
+    // 初次加载历史用：直接跳到底（不平滑滚），让用户一进来就看到最新一轮
+    function scrollToBottom() {
+      window.scrollTo({ top: document.body.scrollHeight });
+    }
+
+    // 把后端存的一条消息 {role:'user'|'assistant', content, created_at}
+    // 还原成前端的一个 turn。注意角色映射：assistant → agent（模板用 agent）。
+    function fmtTime(epochSeconds) {
+      const d = new Date(epochSeconds * 1000);
+      return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    }
+    function toTurn(m) {
+      return {
+        // 存的是 user/assistant，前端模板用 user/agent —— 必须映射，
+        // 直接用 m.role 会得到 'assistant'，模板三种 role 都不匹配 → 渲染不出来
+        role: m.role === 'user' ? 'user' : 'agent',
+        text: m.content,
+        time: fmtTime(m.created_at),
+        created_at: m.created_at,   // 上拉加载更早时拿最顶那条的它当游标，必须留
+        isHistory: true,            // 标记历史；不带 draftId/orderState → 不渲染确认/取消按钮
+      };
+    }
+
+    // 登录成功 / 带持久 token 进页面时：拉最近 20 条，铺进 turns，滚到底看最新
+    async function loadInitialHistory() {
+      const r = await fetch(apiBase + '/history?limit=20', {
+        headers: { 'Authorization': 'Bearer ' + auth.token },
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      const msgs = data.messages || [];
+      turns.value = msgs.map(toTurn);
+      noMoreHistory = msgs.length < 20;   // 不足 20 条 = 没更多了
+      await nextTick();
+      scrollToBottom();
+    }
+
+    // 上拉到顶 → 加载更早的一页。难点是滚动位置补偿：往最前插内容会把
+    // 用户正在看的内容顶下去，必须把 scrollTop 加上"新增高度"才不跳。
+    // 本应用整页滚（无内部滚动容器），所以量的是 document.scrollingElement。
+    let loadingMore = false;
+
+    async function loadMoreHistory() {
+      if (loadingMore || noMoreHistory || turns.value.length === 0) return;
+      const oldest = turns.value[0];
+      // 最顶若是刚发的实时消息（无 created_at）→ 没有可用游标，不请求
+      if (oldest.created_at == null) return;
+
+      loadingMore = true;
+      const scroller = document.scrollingElement || document.documentElement;
+      const oldHeight = scroller.scrollHeight;   // ★插入前的总高度
+      try {
+        const r = await fetch(
+          apiBase + '/history?limit=20&before=' + oldest.created_at,
+          { headers: { 'Authorization': 'Bearer ' + auth.token } },
+        );
+        if (!r.ok) return;
+        const data = await r.json();
+        const msgs = data.messages || [];
+        if (msgs.length === 0) { noMoreHistory = true; return; }
+        if (msgs.length < 20) noMoreHistory = true;   // 不足一页 = 这是最早的一批
+        turns.value = [...msgs.map(toTurn), ...turns.value];   // 插到最前
+        await nextTick();
+        // ★位置补偿：scrollTop 加上新增的高度，用户视角不跳
+        scroller.scrollTop += scroller.scrollHeight - oldHeight;
+      } finally {
+        loadingMore = false;
+      }
+    }
+
+    // 整页滚到接近顶部时拉更早的。loadingMore 锁在 loadMoreHistory 开头同步置位，
+    // 快速滚动连发的 scroll 事件会被它挡掉，不会重复请求。
+    function onScroll() {
+      const scroller = document.scrollingElement || document.documentElement;
+      if (scroller.scrollTop < 50) loadMoreHistory();
     }
 
     function sleep(ms) {
@@ -1072,6 +1151,14 @@ createApp({
         turn.orderMsg = (e && e.message) ? e.message : String(e);
       }
     }
+
+    // 带持久 token 刷新/重开页面时也补拉历史（localStorage 里已是登录态，
+    // 否则刷新后明明"已登录"却空白，得重登才看得到历史）
+    onMounted(() => {
+      if (auth.token) loadInitialHistory();
+      // 整页滚动，没有内部滚动容器 → 监听 window（模板 @scroll 绑不到 window）
+      window.addEventListener('scroll', onScroll, { passive: true });
+    });
 
     return {
       apiBase,

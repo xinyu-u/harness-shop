@@ -80,6 +80,15 @@ class Store(ABC):
     @abstractmethod
     def add_product(self, product_id: str, name: str, price: int, category: str) -> bool: ...
 
+    # ---- 聊天档案（上拉加载式历史）----
+    @abstractmethod
+    def save_message(self, user_id: str, role: str, content: str) -> None: ...
+
+    @abstractmethod
+    def get_messages(
+        self, user_id: str, limit: int = 20, before: float | None = None,
+    ) -> list[dict]: ...
+
 
 class MemoryStore(Store):
     """字典实现：第一期用它。"""
@@ -107,6 +116,8 @@ class MemoryStore(Store):
         ]
         self._orders: list[dict] = []
         self._users: dict[str, dict] = {}   # user_id -> {password_hash, role}
+        # 聊天档案：按插入顺序（即时间正序）追加，list 顺序天然是 id 兜底排序
+        self._messages: list[dict] = []
 
     def get_product(self, product_id):
         return self._products.get(product_id)
@@ -246,6 +257,25 @@ class MemoryStore(Store):
         }
         return True
 
+    # ---- 聊天档案 ----
+    def save_message(self, user_id, role, content):
+        self._messages.append({
+            "user_id": user_id.lower(), "role": role,
+            "content": content, "created_at": time.time(),
+        })
+
+    def get_messages(self, user_id, limit=20, before=None):
+        uid = user_id.lower()
+        rows = [m for m in self._messages if m["user_id"] == uid]
+        if before is not None:
+            rows = [m for m in rows if m["created_at"] < before]
+        # _messages 按插入顺序追加 = 时间正序；取最近 limit 条即末尾切片，已是正序
+        recent = rows[-limit:]
+        return [
+            {"role": m["role"], "content": m["content"], "created_at": m["created_at"]}
+            for m in recent
+        ]
+
 
 class SqliteStore(Store):
     """SQLite 实现：第二期用它。
@@ -332,6 +362,21 @@ class SqliteStore(Store):
                 role TEXT NOT NULL DEFAULT 'user'
             )
         """)
+        # 6) 聊天档案表（每条消息一行；id 自增兼作同时间戳的兜底排序键）
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,           -- 'user' / 'assistant'
+                content TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        # 按 (user_id, created_at) 取某人最近 N 条 / 游标分页，走这条复合索引
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_user_time "
+            "ON chat_messages(user_id, created_at)"
+        )
 
         # 每张表只在空时塞初始数据，避免每次启动重复 INSERT
         if self._conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
@@ -629,3 +674,39 @@ class SqliteStore(Store):
             return True
         except sqlite3.IntegrityError:
             return False   # 主键冲突 → 商品已存在
+
+    # ---- 聊天档案 ----
+    def save_message(self, user_id, role, content):
+        # user_id 归一化小写，和账号一致（注册/登录同规则）
+        self._conn.execute(
+            "INSERT INTO chat_messages (user_id, role, content, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id.lower(), role, content, time.time()),
+        )
+        self._conn.commit()
+
+    def get_messages(self, user_id, limit=20, before=None):
+        """取最近 limit 条（倒序取），反转成正序返回（前端按对话顺序显示）。
+
+        before=游标（上一页最早一条的 created_at），取更早的，用于上拉加载。
+        ORDER BY 加 id DESC 兜底：同一时间戳的多条也有稳定顺序。
+        """
+        uid = user_id.lower()
+        if before is None:
+            rows = self._conn.execute(
+                "SELECT role, content, created_at FROM chat_messages "
+                "WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (uid, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT role, content, created_at FROM chat_messages "
+                "WHERE user_id = ? AND created_at < ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (uid, before, limit),
+            ).fetchall()
+        # 倒序取最近，reversed 成正序
+        return [
+            {"role": r[0], "content": r[1], "created_at": r[2]}
+            for r in reversed(rows)
+        ]

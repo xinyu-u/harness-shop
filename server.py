@@ -236,6 +236,7 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest, authorization: str | None = Header(default=None)):
     user_id, role = _auth(authorization)
+    store.save_message(user_id, "user", req.message)   # ① 落库用户消息（工具过程不存）
     engine = get_engine(user_id, role)
 
     async def generate():
@@ -266,11 +267,27 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(defau
                         busy=False,
                     )
                 elif isinstance(event, AssistantTurnComplete):
-                    yield _event_line("final", reply=_assistant_text(event), draft_id=draft_id)
+                    reply = _assistant_text(event)
+                    store.save_message(user_id, "assistant", reply)   # ② 落库 agent 最终回复
+                    yield _event_line("final", reply=reply, draft_id=draft_id)
         except Exception as e:
             yield _event_line("error", message=str(e))
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@app.get("/history")
+def get_history(
+    authorization: str | None = Header(default=None),
+    limit: int = 20,
+    before: float | None = None,
+):
+    """聊天档案：只查自己的历史（user_id 从 token 取，归属隔离）。
+
+    上拉加载：前端把已加载最早一条的 created_at 作为 before 传上来，取更早的一页。
+    """
+    user_id, _ = _auth(authorization)
+    return {"messages": store.get_messages(user_id, limit=limit, before=before)}
 
 
 @app.post("/orders/{draft_id}/confirm", response_model=ConfirmResponse)
