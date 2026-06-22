@@ -12,6 +12,15 @@ load_dotenv()
 os.environ["OPENAI_API_KEY"] = os.getenv("api_key", "")
 os.environ["OPENAI_BASE_URL"] = os.getenv("base_url", "")
 
+DEFAULT_API_TIMEOUT = 60.0
+
+
+def _api_timeout() -> float:
+    raw = os.getenv("api_timeout")
+    if raw:
+        return float(raw)
+    return DEFAULT_API_TIMEOUT
+
 
 class ModelClient(Protocol):
     async def stream_message(
@@ -48,10 +57,11 @@ class FakeClient:
 
 
 class OpenAIClient:
-    def __init__(self, model: str = "gpt-4o-mini"):
+    def __init__(self, model: str = "gpt-4o-mini", timeout: float | None = None):
         self._client = AsyncOpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL"),
+            timeout=timeout if timeout is not None else _api_timeout(),
         )
         self._model = model
 
