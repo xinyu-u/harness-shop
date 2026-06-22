@@ -1004,7 +1004,11 @@ createApp({
       const text = draft.value.trim();
       draft.value = '';
       turns.value.push({ role: 'user', text, time: stamp() });
-      const assistantTurn = {
+      // 必须用 reactive 包一层：直接 push 普通对象后，本地变量 assistantTurn 仍指向
+      // 原始对象，而模板遍历拿到的是数组代理另建的元素代理。改原始对象不走代理的 set 钩子，
+      // Vue 不会重渲染——于是中间状态(查库存…)和打字机全都不刷新，只在 loading 变更等
+      // 别的响应式触发时才跳到最终结果。reactive 后本地变量就是那个代理，改它即触发渲染。
+      const assistantTurn = reactive({
         role: 'agent',
         text: '正在理解你的需求…',
         time: stamp(),
@@ -1013,7 +1017,7 @@ createApp({
         draftId: null,        // 后端透出的草稿订单号；有值才显示"确认/取消"按钮
         orderState: 'idle',   // idle | confirming | cancelling | done | cancelled | failed
         orderMsg: '',
-      };
+      });
       turns.value.push(assistantTurn);
       loading.value = true;
       now.value = stamp();
@@ -1042,13 +1046,28 @@ createApp({
         }
         let gotFinal = false;
         let revealPromise = null;
+        // 工具是本地 sqlite，started→completed 往往只隔十几毫秒，Vue 会把两次改动并成
+        // 一帧 → "正在查库存…"根本来不及画出来。所以：①只显示进行中动词,丢掉"查到了库存"
+        // 那条 completed(出错时仍显示,好让用户看到提示);②每条状态至少驻留 MIN_STATUS_MS,
+        // 让连续的多个 started 也各有露脸时间。readStreamEvents 是 await onEvent,这里 sleep
+        // 自然给读循环限速;ndjson 包很小,服务端缓冲扛得住,无明显背压。
+        let lastStatusAt = 0;
+        const MIN_STATUS_MS = 450;
+        const pace = async () => {
+          const wait = MIN_STATUS_MS - (Date.now() - lastStatusAt);
+          if (wait > 0) await sleep(wait);
+        };
         await readStreamEvents(r, async (event) => {
           if (event.type === 'status') {
+            if (event.phase === 'completed' && !event.is_error) return;  // 丢掉"查到了库存"
+            await pace();
             assistantTurn.pending = true;
             assistantTurn.busy = event.busy !== false;
             assistantTurn.text = event.text || '正在处理…';
+            lastStatusAt = Date.now();
             scrollDown();
           } else if (event.type === 'final') {
+            await pace();   // 让最后一条动词喘口气再开始打字
             gotFinal = true;
             assistantTurn.pending = false;
             assistantTurn.busy = false;
