@@ -89,6 +89,9 @@ class Store(ABC):
         self, user_id: str, limit: int = 20, before: float | None = None,
     ) -> list[dict]: ...
 
+    @abstractmethod
+    def close(self) -> None: ...
+
 
 class MemoryStore(Store):
     """字典实现：第一期用它。"""
@@ -275,6 +278,9 @@ class MemoryStore(Store):
             {"role": m["role"], "content": m["content"], "created_at": m["created_at"]}
             for m in recent
         ]
+
+    def close(self):
+        pass   # 字典实现无连接，空实现满足接口
 
 
 class SqliteStore(Store):
@@ -710,3 +716,6 @@ class SqliteStore(Store):
             {"role": r[0], "content": r[1], "created_at": r[2]}
             for r in reversed(rows)
         ]
+
+    def close(self):
+        self._conn.close()
