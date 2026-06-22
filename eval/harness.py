@@ -5,6 +5,8 @@
   results     ← ToolExecutionCompleted ＝工具真正执行（带 is_error）；"成功执行"＝is_error=False
 """
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -12,6 +14,10 @@ from core.events import (
     AssistantTurnComplete, ToolExecutionStarted, ToolExecutionCompleted,
 )
 from core.messages import TextBlock
+from core.client import OpenAIClient, FakeClient
+from core.engine import QueryEngine
+from business.store import SqliteStore
+from business.cs_tools import build_tools
 
 
 @dataclass
@@ -75,3 +81,49 @@ def reduce_events(events, prompt: str, role: str, store, db_path: str | None = N
             texts.append("".join(b.text for b in e.message.content if isinstance(b, TextBlock)))
     trace.final_text = "\n".join(t for t in texts if t)
     return trace
+
+
+def _fresh_sqlite():
+    """建一个全新的临时 sqlite 文件并返回 (store, path)。_init_db 自动塞 seed。"""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)                       # 空文件即可，SqliteStore 打开后建表+seed
+    return SqliteStore(path), path
+
+
+def seeded_store_value(fn):
+    """在一个全新 seed 库上算 fn(store) 的值（用于实时 ground-truth），算完即清理。"""
+    store, path = _fresh_sqlite()
+    try:
+        return fn(store)
+    finally:
+        store.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def make_client(fake_script=None, force_fake: bool = False):
+    """force_fake 或 EVAL_FAKE=1 → 脚本化 FakeClient；否则真实 OpenAIClient。"""
+    if force_fake or os.getenv("EVAL_FAKE") == "1":
+        return FakeClient(scripted=fake_script)
+    return OpenAIClient()
+
+
+async def run_case(prompt, role="user", auto_confirm=True,
+                   client=None, fake_script=None, force_fake=False) -> Trace:
+    """在一个全新临时 sqlite 上跑真实对话循环，返回 Trace（store 仍打开，供判定函数读）。
+
+    注意：不在这里清理 db——safety 判定要在 store 打开时读状态机；清理由 run_suite 在判定后调
+    trace.cleanup()。
+    """
+    store, path = _fresh_sqlite()
+    if client is None:
+        client = make_client(fake_script, force_fake)
+
+    async def confirm(name, tool_input):
+        return auto_confirm
+
+    engine = QueryEngine(client, build_tools(store), confirm=confirm, role=role)
+    events = [e async for e in engine.submit_message(prompt)]
+    return reduce_events(events, prompt, role, store, db_path=path)
