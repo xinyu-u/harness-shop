@@ -14,12 +14,12 @@ def test_sqlite_close_allows_unlink():
     store.close()
     os.unlink(path)              # 连接已关 → 删除成功，不抛 PermissionError
     assert not os.path.exists(path)
-    print("✅ test_sqlite_close_allows_unlink 通过")
+    print("[PASS] test_sqlite_close_allows_unlink")
 
 
 def test_memory_close_is_noop():
     MemoryStore().close()        # 不抛异常即可
-    print("✅ test_memory_close_is_noop 通过")
+    print("[PASS] test_memory_close_is_noop")
 
 
 if __name__ == "__main__":

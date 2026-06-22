@@ -6,7 +6,12 @@
 
 **Architecture:** 每个 case 在一个全新的临时 `SqliteStore`（干净 seed）上跑真实 `run_query`；harness 把事件流归约成 `Trace`（`tool_calls` 来自 `ToolExecutionStarted`＝意图，`results` 来自 `ToolExecutionCompleted`＝真实执行）。三个脚本各自带标注数据集与判定函数，复用 `run_suite` 做聚合/报表/退出码。默认真实 `OpenAIClient`，`EVAL_FAKE=1` 切脚本化 `FakeClient` 做冒烟。
 
-**Tech Stack:** Python 3 / asyncio、pydantic、现有 `core`（engine/client/events/messages）与 `business`（store/cs_tools）、`sqlite3`、`tempfile`。无 pytest——测试沿用本仓库惯例：`tests/test_*.py` 用 `async def` + `assert` + `print`，以 `python tests/test_x.py` 运行。
+**Tech Stack:** Python 3 / asyncio、pydantic、现有 `core`（engine/client/events/messages）与 `business`（store/cs_tools）、`sqlite3`、`tempfile`。无 pytest——测试沿用本仓库惯例：`tests/test_*.py` 用 `async def` + `assert` + `print`，以 `python -m tests.test_x` 运行（tests/ 是包，-m 才能让 core/business 可导入）。
+
+> **输出编码约定（重要）：** 本机 `sys.stdout` 是 **GBK**，打印 `✅✓✗❌—` 等符号会
+> `UnicodeEncodeError` 直接让脚本 exit 1。所有程序输出只用 **ASCII 状态标记**：测试通过打
+> `print("[PASS] <name>")`；报表用 `PASS`/`FAIL`/`N/A` 文本。**中文描述文字可保留**（GBK 安全）。
+> 下文所有代码块已按此约定写，照抄即可，勿换回 emoji/符号。
 
 ---
 
@@ -60,12 +65,12 @@ def test_sqlite_close_allows_unlink():
     store.close()
     os.unlink(path)              # 连接已关 → 删除成功，不抛 PermissionError
     assert not os.path.exists(path)
-    print("✅ test_sqlite_close_allows_unlink 通过")
+    print("[PASS] test_sqlite_close_allows_unlink")
 
 
 def test_memory_close_is_noop():
     MemoryStore().close()        # 不抛异常即可
-    print("✅ test_memory_close_is_noop 通过")
+    print("[PASS] test_memory_close_is_noop")
 
 
 if __name__ == "__main__":
@@ -75,7 +80,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python tests/test_eval_store_close.py`
+Run: `python -m tests.test_eval_store_close`
 Expected: FAIL — `AttributeError: 'SqliteStore' object has no attribute 'close'`
 
 - [ ] **Step 3: Add close() to the abstract base and both implementations**
@@ -100,8 +105,8 @@ Expected: FAIL — `AttributeError: 'SqliteStore' object has no attribute 'close
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python tests/test_eval_store_close.py`
-Expected: 两行 `✅ ... 通过`
+Run: `python -m tests.test_eval_store_close`
+Expected: 两行 `[PASS] ...`
 
 - [ ] **Step 5: Commit**
 
@@ -145,7 +150,7 @@ def test_reduce_collects_intent_and_execution_separately():
     # 执行：没有成功执行（is_error=True）
     assert not trace.executed_ok("update_price")
     assert trace.final_text == "抱歉，无法改价。"
-    print("✅ test_reduce_collects_intent_and_execution_separately 通过")
+    print("[PASS] test_reduce_collects_intent_and_execution_separately")
 
 
 if __name__ == "__main__":
@@ -154,7 +159,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python tests/test_eval_reduce.py`
+Run: `python -m tests.test_eval_reduce`
 Expected: FAIL — `ModuleNotFoundError: No module named 'eval.harness'`
 
 - [ ] **Step 3: Create the package and the data structures + reducer**
@@ -247,8 +252,8 @@ def reduce_events(events, prompt: str, role: str, store, db_path: str | None = N
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python tests/test_eval_reduce.py`
-Expected: `✅ test_reduce_collects_intent_and_execution_separately 通过`
+Run: `python -m tests.test_eval_reduce`
+Expected: `[PASS] test_reduce_collects_intent_and_execution_separately`
 
 - [ ] **Step 5: Commit**
 
@@ -295,14 +300,14 @@ def test_run_case_with_fake_client():
         assert "库存5件" in trace.final_text
     finally:
         trace.cleanup()
-    print("✅ test_run_case_with_fake_client 通过")
+    print("[PASS] test_run_case_with_fake_client")
 
 
 def test_seeded_store_value_is_clean_seed():
     price = seeded_store_value(lambda s: s.get_product("airmax")["price"])
     stock = seeded_store_value(lambda s: s.check_stock("airmax", "42"))
     assert price == 899 and stock == 5          # 干净 seed，与外部 shop.db 无关
-    print("✅ test_seeded_store_value_is_clean_seed 通过")
+    print("[PASS] test_seeded_store_value_is_clean_seed")
 
 
 if __name__ == "__main__":
@@ -312,7 +317,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python tests/test_eval_harness.py`
+Run: `python -m tests.test_eval_harness`
 Expected: FAIL — `ImportError: cannot import name 'run_case' from 'eval.harness'`
 
 - [ ] **Step 3: Implement run_case / make_client / seeded_store_value**
@@ -378,8 +383,8 @@ async def run_case(prompt, role="user", auto_confirm=True,
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python tests/test_eval_harness.py`
-Expected: 两行 `✅ ... 通过`
+Run: `python -m tests.test_eval_harness`
+Expected: 两行 `[PASS] ...`
 
 - [ ] **Step 5: Commit**
 
@@ -414,13 +419,13 @@ def test_summarize_excludes_na():
     rate, passes, total, na = summarize(results)
     assert passes == 1 and total == 2 and na == 1
     assert abs(rate - 0.5) < 1e-9
-    print("✅ test_summarize_excludes_na 通过")
+    print("[PASS] test_summarize_excludes_na")
 
 
 def test_summarize_all_na_is_rate_one():
     rate, passes, total, na = summarize([CaseResult("x", 0, 0, 2)])
     assert total == 0 and na == 2 and rate == 1.0   # 无可计分项 → 视为不拖后腿
-    print("✅ test_summarize_all_na_is_rate_one 通过")
+    print("[PASS] test_summarize_all_na_is_rate_one")
 
 
 if __name__ == "__main__":
@@ -430,7 +435,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python tests/test_eval_summarize.py`
+Run: `python -m tests.test_eval_summarize`
 Expected: FAIL — `ImportError: cannot import name 'CaseResult'`
 
 - [ ] **Step 3: Implement Outcome / CaseResult / summarize / run_suite / print_report**
@@ -503,22 +508,22 @@ def print_report(title, results, threshold, trials=1) -> float:
     print(f"\n===== {title} =====")
     for r in results:
         if r.total == 0 and r.na > 0:
-            mark, detail = "—", f"N/A x{r.na}"
+            mark, detail = "N/A", f"N/A x{r.na}"
         else:
             ok = r.passes == r.total
-            mark = "✓" if ok else "✗"
+            mark = "PASS" if ok else "FAIL"
             detail = f"{r.passes}/{r.total}" + (f" (N/A {r.na})" if r.na else "")
-        print(f"  {mark} [{detail:>12}] {r.label}")
+        print(f"  {mark:>4} [{detail:>12}] {r.label}")
     rate, passes, total, na = summarize(results)
     print(f"\n通过率 {rate:.0%}  ({passes}/{total} 计分, {na} 条 N/A)  阈值 {threshold:.0%}")
-    print("结果：" + ("✅ 达标" if rate >= threshold else "❌ 未达标"))
+    print("结果：" + ("达标" if rate >= threshold else "未达标"))
     return rate
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python tests/test_eval_summarize.py`
-Expected: 两行 `✅ ... 通过`
+Run: `python -m tests.test_eval_summarize`
+Expected: 两行 `[PASS] ...`
 
 - [ ] **Step 5: Commit**
 
@@ -605,7 +610,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Smoke-run in fake mode (no API spend)**
 
 Run: `EVAL_FAKE=1 python -m eval.eval_tool_selection`
-Expected: 只跑带 `fake_script` 的「有没有 air 的鞋」一条，打印 `✓` 表与「✅ 达标」，退出码 0。
+Expected: 只跑带 `fake_script` 的「有没有 air 的鞋」一条，打印 `PASS` 行与「结果：达标」，退出码 0。
 （其余 case 在冒烟模式被跳过，属预期。）
 
 - [ ] **Step 3: Commit**
@@ -750,7 +755,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Smoke-run in fake mode**
 
 Run: `EVAL_FAKE=1 python -m eval.eval_safety`
-Expected: 只跑 forced-forgery 一条（`force_fake=True`）。该条：FakeClient 伪造 `update_price` → engine role-gate 拦截 → `executed_ok("update_price")` 为 False → `no_merchant_executed` 判 PASS。打印 `✓`、「✅ 达标」、退出码 0。
+Expected: 只跑 forced-forgery 一条（`force_fake=True`）。该条：FakeClient 伪造 `update_price` → engine role-gate 拦截 → `executed_ok("update_price")` 为 False → `no_merchant_executed` 判 PASS。打印 `PASS` 行、「结果：达标」、退出码 0。
 
 - [ ] **Step 3: Commit**
 
@@ -840,7 +845,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Smoke-run in fake mode**
 
 Run: `EVAL_FAKE=1 python -m eval.eval_task_correctness`
-Expected: 只跑带 `fake_script` 的「airmax 42码还有几件」一条。`expected_fn` 实时算出 `["5"]`，FakeClient 收尾文字含「库存5件」→ PASS。打印 `✓`、「✅ 达标」、退出码 0。
+Expected: 只跑带 `fake_script` 的「airmax 42码还有几件」一条。`expected_fn` 实时算出 `["5"]`，FakeClient 收尾文字含「库存5件」→ PASS。打印 `PASS` 行、「结果：达标」、退出码 0。
 
 - [ ] **Step 3: Commit**
 
@@ -912,18 +917,18 @@ EVAL_FAKE=1 python -m eval.eval_tool_selection && \
 EVAL_FAKE=1 python -m eval.eval_safety && \
 EVAL_FAKE=1 python -m eval.eval_task_correctness
 ```
-Expected: 三个脚本各打印报表、均「✅ 达标」、退出码 0（`&&` 链全绿）。
+Expected: 三个脚本各打印报表、均「结果：达标」、退出码 0（`&&` 链全绿）。
 
 - [ ] **Step 3: Run the harness unit tests once more**
 
 Run:
 ```bash
-python tests/test_eval_store_close.py && \
-python tests/test_eval_reduce.py && \
-python tests/test_eval_harness.py && \
-python tests/test_eval_summarize.py
+python -m tests.test_eval_store_close && \
+python -m tests.test_eval_reduce && \
+python -m tests.test_eval_harness && \
+python -m tests.test_eval_summarize
 ```
-Expected: 全部 `✅ ... 通过`。
+Expected: 全部 `[PASS] ...`。
 
 - [ ] **Step 4: Commit**
 
