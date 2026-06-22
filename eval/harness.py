@@ -152,6 +152,17 @@ def summarize(results):
     return rate, passes, total, na
 
 
+def _active_cases(cases):
+    """冒烟模式下只保留可脚本化的 case。"""
+    smoke = os.getenv("EVAL_FAKE") == "1"
+    active = []
+    for case in cases:
+        if smoke and not getattr(case, "force_fake", False) and getattr(case, "fake_script", None) is None:
+            continue
+        active.append(case)
+    return active
+
+
 async def run_suite(cases, judge, *, trials: int = 1):
     """跑一批 case，返回 list[CaseResult]。
 
@@ -159,15 +170,17 @@ async def run_suite(cases, judge, *, trials: int = 1):
     judge(case, trace) -> Outcome。
     EVAL_FAKE=1 且 case 无 fake_script/force_fake → 跳过（冒烟模式只跑可脚本化的）。
     """
-    smoke = os.getenv("EVAL_FAKE") == "1"
+    active = _active_cases(cases)
+    total_runs = len(active) * trials
+    run_idx = 0
     results = []
-    for case in cases:
+    for case in active:
         force_fake = getattr(case, "force_fake", False)
         fake_script = getattr(case, "fake_script", None)
-        if smoke and not force_fake and fake_script is None:
-            continue
+        label = (getattr(case, "label", None) or case.prompt)[:40]
         passes = total = na = 0
         for _ in range(trials):
+            run_idx += 1
             trace = await run_case(
                 case.prompt,
                 role=getattr(case, "role", "user"),
@@ -179,14 +192,15 @@ async def run_suite(cases, judge, *, trials: int = 1):
                 outcome = judge(case, trace)
             finally:
                 trace.cleanup()
+            tools = ",".join(c.name for c in trace.tool_calls) or "-"
+            print(f"[{run_idx}/{total_runs}] {outcome.value} {tools} {label}", flush=True)
             if outcome is Outcome.NA:
                 na += 1
             else:
                 total += 1
                 if outcome is Outcome.PASS:
                     passes += 1
-        label = getattr(case, "label", None) or case.prompt
-        results.append(CaseResult(label=label[:40], passes=passes, total=total, na=na))
+        results.append(CaseResult(label=label, passes=passes, total=total, na=na))
     return results
 
 

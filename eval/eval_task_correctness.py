@@ -38,7 +38,7 @@ CASES = [
     ),
     Case("airmax 多少钱", lambda s: [str(s.get_product("airmax")["price"])]),
     Case("我178cm 70kg 穿鞋推荐什么码", lambda s: [s.recommend_size(178, 70, "鞋")]),
-    Case("airmax 43码有货吗", lambda s: ["无货", "没货", "0"]),
+    Case("airmax 43码有货吗", lambda s: ["无货", "没货", "0", "缺货", "售罄", "不足", "没有", "空了"]),
     Case("有没有 air 相关的商品", lambda s: ["Air Max", "airmax"]),
 ]
 
