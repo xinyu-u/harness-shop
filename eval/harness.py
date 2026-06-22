@@ -127,3 +127,81 @@ async def run_case(prompt, role="user", auto_confirm=True,
     engine = QueryEngine(client, build_tools(store), confirm=confirm, role=role)
     events = [e async for e in engine.submit_message(prompt)]
     return reduce_events(events, prompt, role, store, db_path=path)
+
+
+class Outcome(Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    NA = "NA"        # 前提未触发，不计分（如：状态机不变量但模型没下单）
+
+
+@dataclass
+class CaseResult:
+    label: str
+    passes: int      # trials 里 PASS 次数
+    total: int       # 计分次数（PASS+FAIL，排除 NA）
+    na: int          # NA 次数
+
+
+def summarize(results):
+    """聚合：返回 (rate, passes, total, na)。total 不含 NA；无可计分项时 rate=1.0。"""
+    passes = sum(r.passes for r in results)
+    total = sum(r.total for r in results)
+    na = sum(r.na for r in results)
+    rate = passes / total if total else 1.0
+    return rate, passes, total, na
+
+
+async def run_suite(cases, judge, *, trials: int = 1):
+    """跑一批 case，返回 list[CaseResult]。
+
+    case 鸭子类型需有：.prompt .role；可选 .label .auto_confirm .fake_script .force_fake。
+    judge(case, trace) -> Outcome。
+    EVAL_FAKE=1 且 case 无 fake_script/force_fake → 跳过（冒烟模式只跑可脚本化的）。
+    """
+    smoke = os.getenv("EVAL_FAKE") == "1"
+    results = []
+    for case in cases:
+        force_fake = getattr(case, "force_fake", False)
+        fake_script = getattr(case, "fake_script", None)
+        if smoke and not force_fake and fake_script is None:
+            continue
+        passes = total = na = 0
+        for _ in range(trials):
+            trace = await run_case(
+                case.prompt,
+                role=getattr(case, "role", "user"),
+                auto_confirm=getattr(case, "auto_confirm", True),
+                fake_script=fake_script,
+                force_fake=force_fake,
+            )
+            try:
+                outcome = judge(case, trace)
+            finally:
+                trace.cleanup()
+            if outcome is Outcome.NA:
+                na += 1
+            else:
+                total += 1
+                if outcome is Outcome.PASS:
+                    passes += 1
+        label = getattr(case, "label", None) or case.prompt
+        results.append(CaseResult(label=label[:40], passes=passes, total=total, na=na))
+    return results
+
+
+def print_report(title, results, threshold, trials=1) -> float:
+    """打印逐 case 表 + 汇总，返回总 rate。"""
+    print(f"\n===== {title} =====")
+    for r in results:
+        if r.total == 0 and r.na > 0:
+            mark, detail = "N/A", f"N/A x{r.na}"
+        else:
+            ok = r.passes == r.total
+            mark = "PASS" if ok else "FAIL"
+            detail = f"{r.passes}/{r.total}" + (f" (N/A {r.na})" if r.na else "")
+        print(f"  {mark:>4} [{detail:>12}] {r.label}")
+    rate, passes, total, na = summarize(results)
+    print(f"\n通过率 {rate:.0%}  ({passes}/{total} 计分, {na} 条 N/A)  阈值 {threshold:.0%}")
+    print("结果：" + ("达标" if rate >= threshold else "未达标"))
+    return rate
