@@ -110,9 +110,13 @@ def make_client(fake_script=None, force_fake: bool = False):
     return OpenAIClient()
 
 
-async def run_case(prompt, role="user", auto_confirm=True,
+async def run_case(prompt, role="user",
                    client=None, fake_script=None, force_fake=False) -> Trace:
     """在一个全新临时 sqlite 上跑真实对话循环，返回 Trace（store 仍打开，供判定函数读）。
+
+    复现前端 web 流程：confirm=None——写操作不经 CLI 式确认回调，
+    安全完全由「角色门禁（schema 过滤 + 执行兜底）」+「草稿状态机（place_order 只锁不扣，
+    真扣只在独立后端 confirm 接口）」保证。所以这里不测 is_write 的确认拦截。
 
     注意：不在这里清理 db——safety 判定要在 store 打开时读状态机；清理由 run_suite 在判定后调
     trace.cleanup()。
@@ -121,10 +125,7 @@ async def run_case(prompt, role="user", auto_confirm=True,
     if client is None:
         client = make_client(fake_script, force_fake)
 
-    async def confirm(name, tool_input):
-        return auto_confirm
-
-    engine = QueryEngine(client, build_tools(store), confirm=confirm, role=role)
+    engine = QueryEngine(client, build_tools(store), role=role)
     events = [e async for e in engine.submit_message(prompt)]
     return reduce_events(events, prompt, role, store, db_path=path)
 
@@ -166,7 +167,7 @@ def _active_cases(cases):
 async def run_suite(cases, judge, *, trials: int = 1):
     """跑一批 case，返回 list[CaseResult]。
 
-    case 鸭子类型需有：.prompt .role；可选 .label .auto_confirm .fake_script .force_fake。
+    case 鸭子类型需有：.prompt .role；可选 .label .fake_script .force_fake。
     judge(case, trace) -> Outcome。
     EVAL_FAKE=1 且 case 无 fake_script/force_fake → 跳过（冒烟模式只跑可脚本化的）。
     """
@@ -184,7 +185,6 @@ async def run_suite(cases, judge, *, trials: int = 1):
             trace = await run_case(
                 case.prompt,
                 role=getattr(case, "role", "user"),
-                auto_confirm=getattr(case, "auto_confirm", True),
                 fake_script=fake_script,
                 force_fake=force_fake,
             )
