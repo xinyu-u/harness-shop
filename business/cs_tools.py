@@ -289,6 +289,48 @@ class AddProductTool(BaseTool):
         return ToolResult(output=f"已上架：{arguments.product_id} | {arguments.name} | ¥{arguments.price}")
 
 
+# ============ B类·商家专属：restock_product ============
+
+class RestockProductInput(BaseModel):
+    product_id: str = Field(description="要补货的商品ID")
+    size: str = Field(description="尺码，如 42 / L")
+    add_qty: int = Field(description="补货数量（在现有库存上【增加】这么多，不是设为这个值）", gt=0)
+
+
+class RestockProductTool(BaseTool):
+    name = "restock_product"
+    description = (
+        "给【已存在商品的某个尺码】补货（仅商家）：在现有库存上增加 add_qty 件。"
+        "用于'airmax 42码补20件''L码再进10件'这类补货。"
+        "注意：这是增量加，不是把库存改成某个绝对值；新增一个还不存在的商品请用 add_product。"
+    )
+    input_model = RestockProductInput
+    is_write = True
+    allowed_roles = {"merchant"}
+
+    def __init__(self, store: Store):
+        self._store = store
+
+    async def execute(self, arguments: RestockProductInput) -> ToolResult:
+        try:
+            new_qty = self._store.restock(
+                arguments.product_id, arguments.size, arguments.add_qty
+            )
+        except Exception as e:
+            return ToolResult(output=f"补货失败：{e}", is_error=True)
+        if new_qty is None:
+            return ToolResult(
+                output=f"商品 {arguments.product_id} 不存在，无法补货（新增商品请用 add_product）",
+                is_error=True,
+            )
+        return ToolResult(
+            output=(
+                f"已为 {arguments.product_id} {arguments.size}码 补货 {arguments.add_qty} 件，"
+                f"当前库存 {new_qty} 件"
+            )
+        )
+
+
 # ============ 记忆工具：模型自己决定记什么 ============
 
 class WriteMemoryInput(BaseModel):
@@ -327,5 +369,6 @@ def build_tools(store: Store, user_id: str = "default") -> dict[str, BaseTool]:
         WriteMemoryTool(user_id),
         UpdatePriceTool(store),
         AddProductTool(store),
+        RestockProductTool(store),
     ]
     return {t.name: t for t in tools}

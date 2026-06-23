@@ -80,6 +80,9 @@ class Store(ABC):
     @abstractmethod
     def add_product(self, product_id: str, name: str, price: int, category: str) -> bool: ...
 
+    @abstractmethod
+    def restock(self, product_id: str, size: str, add_qty: int) -> int | None: ...
+
     # ---- 聊天档案（上拉加载式历史）----
     @abstractmethod
     def save_message(self, user_id: str, role: str, content: str) -> None: ...
@@ -259,6 +262,15 @@ class MemoryStore(Store):
             "id": product_id, "name": name, "price": price, "category": category,
         }
         return True
+
+    def restock(self, product_id, size, add_qty):
+        # 增量补货：qty += add_qty（不覆写绝对值）。商品不存在 → None。
+        # 该尺码还没有库存行 → 从 0 起新建。只动 qty，不碰 locked。
+        if product_id not in self._products:
+            return None
+        key = (product_id, size)
+        self._inventory[key] = self._inventory.get(key, 0) + add_qty
+        return self._inventory[key]
 
     # ---- 聊天档案 ----
     def save_message(self, user_id, role, content):
@@ -680,6 +692,34 @@ class SqliteStore(Store):
             return True
         except sqlite3.IntegrityError:
             return False   # 主键冲突 → 商品已存在
+
+    def restock(self, product_id, size, add_qty):
+        # 增量补货：qty += add_qty（原子自增，不覆写绝对值）。商品不存在 → None。
+        # 该 (product_id, size) 还没有库存行 → 新建（从 0 起补）。只动 qty，不碰 locked。
+        if self._conn.execute(
+            "SELECT 1 FROM products WHERE id = ?", (product_id,)
+        ).fetchone() is None:
+            return None
+        try:
+            cur = self._conn.execute(
+                "UPDATE inventory SET qty = qty + ? WHERE product_id = ? AND size = ?",
+                (add_qty, product_id, size),
+            )
+            if cur.rowcount == 0:
+                # 没有该尺码的库存行：新建（locked 走默认 0）
+                self._conn.execute(
+                    "INSERT INTO inventory (product_id, size, qty) VALUES (?, ?, ?)",
+                    (product_id, size, add_qty),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        row = self._conn.execute(
+            "SELECT qty FROM inventory WHERE product_id = ? AND size = ?",
+            (product_id, size),
+        ).fetchone()
+        return row[0]
 
     # ---- 聊天档案 ----
     def save_message(self, user_id, role, content):
