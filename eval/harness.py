@@ -5,8 +5,10 @@
   results     ← ToolExecutionCompleted ＝工具真正执行（带 is_error）；"成功执行"＝is_error=False
 """
 
+import asyncio
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -42,6 +44,7 @@ class Trace:
     final_text: str = ""
     store: object = None
     _db_path: str | None = None
+    _mem_user: str | None = None   # 本 case 独立记忆命名空间，cleanup 时连同文件删除
 
     # ---- 给判定函数用的小帮手 ----
     def called(self, name: str) -> bool:
@@ -66,6 +69,11 @@ class Trace:
                 os.unlink(self._db_path)
             except OSError:
                 pass
+        if self._mem_user:
+            try:
+                os.unlink(f"memory_{self._mem_user}.md")
+            except OSError:
+                pass   # 没触发 write_memory 就没这文件，正常
 
 
 def reduce_events(events, prompt: str, role: str, store, db_path: str | None = None) -> Trace:
@@ -125,9 +133,17 @@ async def run_case(prompt, role="user",
     if client is None:
         client = make_client(fake_script, force_fake)
 
-    engine = QueryEngine(client, build_tools(store), role=role)
+    # 每个 case 独立记忆命名空间：write_memory 默认写共享的 memory_default.md，
+    # 会跨 case 串读（每次 submit 都把记忆拼进 system_prompt）、并发下还会文件追加竞争。
+    # 给唯一 user_id 让读写各走各的 memory_eval_<uuid>.md，随 case 一起清理。
+    mem_user = f"eval_{uuid.uuid4().hex}"
+    engine = QueryEngine(
+        client, build_tools(store, user_id=mem_user), role=role, user_id=mem_user,
+    )
     events = [e async for e in engine.submit_message(prompt)]
-    return reduce_events(events, prompt, role, store, db_path=path)
+    trace = reduce_events(events, prompt, role, store, db_path=path)
+    trace._mem_user = mem_user
+    return trace
 
 
 class Outcome(Enum):
@@ -164,44 +180,83 @@ def _active_cases(cases):
     return active
 
 
-async def run_suite(cases, judge, *, trials: int = 1):
-    """跑一批 case，返回 list[CaseResult]。
+def _resolve_concurrency(concurrency: int | None) -> int:
+    """并发上限：显式参数 > EVAL_CONCURRENCY 环境变量 > 默认 8。下限 1。
+
+    上限受你的 API 配额（RPM/并发）约束——撞限流时 engine 会把错误吞成无 tool_calls 的
+    文本回复，导致 case 静默 FAIL，所以默认保守，按需经 EVAL_CONCURRENCY 调高/调低。
+    """
+    if concurrency is None:
+        raw = os.getenv("EVAL_CONCURRENCY")
+        concurrency = int(raw) if raw else 8
+    return max(1, concurrency)
+
+
+async def run_suite(cases, judge, *, trials: int = 1, concurrency: int | None = None):
+    """跑一批 case，返回 list[CaseResult]。case 之间互相独立、并发跑（受 concurrency 限流）。
 
     case 鸭子类型需有：.prompt .role；可选 .label .fake_script .force_fake。
     judge(case, trace) -> Outcome。
     EVAL_FAKE=1 且 case 无 fake_script/force_fake → 跳过（冒烟模式只跑可脚本化的）。
+
+    client 复用：真实模型全套件共享一个 OpenAIClient（复用连接池，省 TLS 握手）。
+    FakeClient 有可变状态（call_count/scripted 索引），绝不能共享——force_fake/冒烟
+    路径传 client=None，由 run_case 每 case 现造。
     """
     active = _active_cases(cases)
     total_runs = len(active) * trials
-    run_idx = 0
-    results = []
-    for case in active:
-        force_fake = getattr(case, "force_fake", False)
-        fake_script = getattr(case, "fake_script", None)
-        label = (getattr(case, "label", None) or case.prompt)[:40]
-        passes = total = na = 0
-        for _ in range(trials):
-            run_idx += 1
+    smoke = os.getenv("EVAL_FAKE") == "1"
+    # 真实模型共享 client；冒烟模式不建（无需 API 凭证）。
+    shared_client = None if smoke else make_client()
+
+    def client_for(case):
+        if smoke or getattr(case, "force_fake", False):
+            return None        # 现造 FakeClient(scripted=fake_script)
+        return shared_client
+
+    sem = asyncio.Semaphore(_resolve_concurrency(concurrency))
+    done = 0   # 完成计数（asyncio 单线程，run_one 内自增→打印之间无 await，天然原子）
+
+    async def run_one(ci: int, case):
+        nonlocal done
+        async with sem:                      # 只限并发 run_case（API 往返），judge 很快不占名额
             trace = await run_case(
                 case.prompt,
                 role=getattr(case, "role", "user"),
-                fake_script=fake_script,
-                force_fake=force_fake,
+                client=client_for(case),
+                fake_script=getattr(case, "fake_script", None),
+                force_fake=getattr(case, "force_fake", False),
             )
-            try:
-                outcome = judge(case, trace)
-            finally:
-                trace.cleanup()
-            tools = ",".join(c.name for c in trace.tool_calls) or "-"
-            print(f"[{run_idx}/{total_runs}] {outcome.value} {tools} {label}", flush=True)
-            if outcome is Outcome.NA:
-                na += 1
-            else:
-                total += 1
-                if outcome is Outcome.PASS:
-                    passes += 1
-        results.append(CaseResult(label=label, passes=passes, total=total, na=na))
-    return results
+        try:
+            outcome = judge(case, trace)
+        finally:
+            trace.cleanup()
+        done += 1
+        tools = ",".join(c.name for c in trace.tool_calls) or "-"
+        label = (getattr(case, "label", None) or case.prompt)[:40]
+        print(f"[{done}/{total_runs}] {outcome.value} {tools} {label}", flush=True)
+        return ci, outcome
+
+    tasks = [run_one(ci, case) for ci, case in enumerate(active) for _ in range(trials)]
+    outcomes = await asyncio.gather(*tasks)
+
+    # 按 case 聚合（gather 返回顺序不定，靠 ci 归位）
+    agg = [{"passes": 0, "total": 0, "na": 0} for _ in active]
+    for ci, outcome in outcomes:
+        if outcome is Outcome.NA:
+            agg[ci]["na"] += 1
+        else:
+            agg[ci]["total"] += 1
+            if outcome is Outcome.PASS:
+                agg[ci]["passes"] += 1
+
+    return [
+        CaseResult(
+            label=(getattr(case, "label", None) or case.prompt)[:40],
+            passes=agg[ci]["passes"], total=agg[ci]["total"], na=agg[ci]["na"],
+        )
+        for ci, case in enumerate(active)
+    ]
 
 
 def print_report(title, results, threshold, trials=1) -> float:
