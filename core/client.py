@@ -57,13 +57,13 @@ class FakeClient:
 
 
 class OpenAIClient:
-    def __init__(self, model: str = "gpt-4o-mini", timeout: float | None = None):
+    def __init__(self, timeout: float | None = None):
         self._client = AsyncOpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL"),
             timeout=timeout if timeout is not None else _api_timeout(),
         )
-        self._model = model
+        self._model = os.getenv("model")
 
     async def stream_message(self, messages, tools=None, system_prompt=None):
         openai_messages = self._to_openai(messages)
