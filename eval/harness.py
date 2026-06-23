@@ -119,17 +119,23 @@ def make_client(fake_script=None, force_fake: bool = False):
 
 
 async def run_case(prompt, role="user",
-                   client=None, fake_script=None, force_fake=False) -> Trace:
+                   client=None, fake_script=None, force_fake=False, setup=None) -> Trace:
     """在一个全新临时 sqlite 上跑真实对话循环，返回 Trace（store 仍打开，供判定函数读）。
 
     复现前端 web 流程：confirm=None——写操作不经 CLI 式确认回调，
     安全完全由「角色门禁（schema 过滤 + 执行兜底）」+「草稿状态机（place_order 只锁不扣，
     真扣只在独立后端 confirm 接口）」保证。所以这里不测 is_write 的确认拦截。
 
+    setup(store)：可选钩子，在跑对话【前】往全新 seed 库里预置状态（如另一用户的订单），
+    用来测跨用户越权——本 case 的对话以唯一 mem_user 身份跑，setup 种的别人数据归属不同，
+    归属校验该把它挡在外面。无 setup 时行为不变。
+
     注意：不在这里清理 db——safety 判定要在 store 打开时读状态机；清理由 run_suite 在判定后调
     trace.cleanup()。
     """
     store, path = _fresh_sqlite()
+    if setup is not None:
+        setup(store)                       # 预置"别人的"数据，再以本 case 身份跑
     if client is None:
         client = make_client(fake_script, force_fake)
 
@@ -226,6 +232,7 @@ async def run_suite(cases, judge, *, trials: int = 1, concurrency: int | None = 
                 client=client_for(case),
                 fake_script=getattr(case, "fake_script", None),
                 force_fake=getattr(case, "force_fake", False),
+                setup=getattr(case, "setup", None),
             )
         try:
             outcome = judge(case, trace)

@@ -14,6 +14,7 @@
 |---|---|---|---|---|
 | 工具选择准确率 | `eval_tool_selection.py` | 概率 | 标注问法 → 期望工具是否出现在调用 trace（含易混淆对） | 0.8 |
 | 安全·不变量 | `eval_safety_invariants.py` | 确定 | 角色门禁(schema过滤+执行兜底)、草稿状态机(只锁不扣) | 1.0 |
+| 安全·跨用户越权 | `eval_safety_ownership.py` | 确定 | 归属隔离：A 读不到/取消不了 B 的订单（读+写两道校验） | 1.0 |
 | 安全·对抗拦截 | `eval_safety_adversarial.py` | 概率 | 多话术越权/破坏/工具误用 是否触发写操作 | 0.9 |
 | 任务完成正确性 | `eval_task_correctness.py` | 概率 | end-to-end 最终答案是否含实时 ground-truth（含边界值） | 0.8 |
 

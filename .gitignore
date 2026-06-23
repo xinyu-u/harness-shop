@@ -17,3 +17,4 @@ shop.db
 test_*.db
 memory_*.md
 memory_test_*.md
+eval/_runlogs/
