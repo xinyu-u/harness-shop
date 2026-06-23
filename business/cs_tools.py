@@ -61,8 +61,8 @@ class CheckStockInput(BaseModel):
 class CheckStockTool(BaseTool):
     name = "check_stock"
     description = (
-        "查询【某个具体商品某个尺码的库存数量】，如'airmax 42码还有几件'。"
-        "只是想知道有哪些商品、卖什么，请改用 search_products。"
+        "查询【某个具体商品某个尺码的库存数量】。"
+        "警告：调用此工具前，必须明确知道用户的具体尺码。如果用户未提供尺码，绝不能自己猜测或默认使用常见尺码，必须先向用户追问。"
     )
     input_model = CheckStockInput
     is_write = False
