@@ -2,9 +2,9 @@
 
 import asyncio
 from core.client import FakeClient
-from core.engine import run_query, QueryEngine
+from core.engine import run_query, QueryEngine, RunConfig
 from core.events import AssistantTurnComplete, ToolExecutionStarted, ToolExecutionCompleted
-from core.messages import ConversationMessage, TextBlock
+from core.messages import ConversationMessage, TextBlock, ToolUseBlock
 from business.store import MemoryStore
 from business.cs_tools import build_tools
 
@@ -30,15 +30,18 @@ async def test_check_stock_flow():
 
 async def test_max_turns():
     """测保险丝：FakeClient 永远调工具，max_turns 必须拦住。"""
+    # 单条脚本=工具调用：stream_message 的 idx 钳到末尾，所以每回合都返回它
+    # → 模型"永远调工具、停不下来"，正好压测保险丝。
+    always_tool = ConversationMessage(role="assistant", content=[
+        ToolUseBlock(name="check_stock", input={"product_id": "airmax", "size": "42"})
+    ])
+    config = RunConfig(
+        client=FakeClient(scripted=[always_tool]),
+        tools=build_tools(MemoryStore()),
+        max_turns=3,
+    )
     messages = [ConversationMessage(role="user", content=[TextBlock(text="测试")])]
-    events = [
-        e async for e in run_query(
-            FakeClient(always_tool=True),    # 永远调工具，停不下来
-            messages,
-            build_tools(MemoryStore()),
-            max_turns=3,
-        )
-    ]
+    events = [e async for e in run_query(config, messages)]
     tool_runs = [e for e in events if isinstance(e, ToolExecutionCompleted)]
     assert len(tool_runs) == 3, f"应执行3次，实际{len(tool_runs)}次"
     # 最后一个事件应是保险丝收尾

@@ -124,15 +124,18 @@ class GetOrderStatusTool(BaseTool):
     input_model = GetOrderStatusInput
     is_write = False
 
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, user_id: str = "default"):
         self._store = store
+        self._user_id = user_id
 
     async def execute(self, arguments: GetOrderStatusInput) -> ToolResult:
         try:
             order = self._store.get_order(arguments.order_id)
         except Exception as e:
             return ToolResult(output=f"查询订单失败：{e}", is_error=True)
-        if order is None:
+        # 归属校验：不是本人的单，与"不存在"合并成同一句回复——
+        # 别人能不能凭"不存在/无权查看"两种不同措辞探出某订单号是否存在。
+        if order is None or order["user_id"] != self._user_id:
             return ToolResult(output=f"订单 {arguments.order_id} 不存在")
         return ToolResult(
             output=f"订单{order['id']}：{order['product_id']} {order['size']}码 x{order['qty']} 状态:{order['status']}"
@@ -197,10 +200,21 @@ class CancelOrderTool(BaseTool):
     input_model = CancelOrderInput
     is_write = True
 
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, user_id: str = "default"):
         self._store = store
+        self._user_id = user_id
 
     async def execute(self, arguments: CancelOrderInput) -> ToolResult:
+        # 先取出订单做归属校验，再决定要不要真取消。
+        # store.cancel_order 本身不带归属校验（也给 HTTP / CLI 用），把关在这一层做：
+        # 漏了这步，用户就能在对话里凭订单号取消别人的单、释放别人的预占。
+        try:
+            order = self._store.get_order(arguments.order_id)
+        except Exception as e:
+            return ToolResult(output=f"取消订单失败：{e}", is_error=True)
+        # 不是本人的单，与"不存在"合并成同一句——不暴露订单号是否存在（减少探测面）。
+        if order is None or order["user_id"] != self._user_id:
+            return ToolResult(output=f"订单 {arguments.order_id} 无法取消（不存在或无权操作）", is_error=True)
         try:
             ok = self._store.cancel_order(arguments.order_id)
         except Exception as e:
@@ -307,9 +321,9 @@ def build_tools(store: Store, user_id: str = "default") -> dict[str, BaseTool]:
         SearchProductsTool(store),
         CheckStockTool(store),
         RecommendSizeTool(store),
-        GetOrderStatusTool(store),
+        GetOrderStatusTool(store, user_id),
         PlaceOrderTool(store, user_id),
-        CancelOrderTool(store),
+        CancelOrderTool(store, user_id),
         WriteMemoryTool(user_id),
         UpdatePriceTool(store),
         AddProductTool(store),
