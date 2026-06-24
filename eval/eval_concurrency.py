@@ -115,8 +115,44 @@ def scenario_oversell_draft(n_threads=20) -> Outcome:
             pass
 
 
+# ───────────────────────── 场景2：确认幂等（只扣一次）─────────────────────────
+def scenario_confirm_idempotent(n_threads=20) -> Outcome:
+    """一张 pending 草稿，N 线程并发 confirm_draft_order。
+    不变量：qty 只扣一次（== seed-1，不是 seed-N）；locked 只释放一次（== 0，不为负）；
+    终态 status=='confirmed'。双重确认会把 qty 扣两次/locked 扣成负——本断言能抓到。"""
+    store, path = _fresh_sqlite()
+    try:
+        seed = _raw(store, "qty", "airmax", "42")
+        did = store.create_draft_order("airmax", "42", 1, "alice")["id"]
+
+        def confirm():
+            order, err = store.confirm_draft_order(did, "alice")
+            return err is None and order is not None
+
+        with ThreadPoolExecutor(max_workers=n_threads) as ex:
+            tags = list(ex.map(lambda _: _classify(confirm), range(n_threads)))
+
+        buckets = {k: tags.count(k) for k in ("ok", "rejected", "locked", "other")}
+        qty = _raw(store, "qty", "airmax", "42")
+        locked = _raw(store, "locked", "airmax", "42")
+        status = store.get_order(did)["status"]
+
+        print(f"    diag confirm-idem: {buckets} | qty={qty} locked={locked} "
+              f"status={status} seed={seed}")
+
+        ok = (qty == seed - 1 and locked == 0 and status == "confirmed")
+        return Outcome.PASS if ok else Outcome.FAIL
+    finally:
+        store.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 SCENARIOS = [
     ("场景1·草稿不超卖（20线程抢库存5）", scenario_oversell_draft),
+    ("场景2·确认幂等只扣一次（20线程确认同一草稿）", scenario_confirm_idempotent),
 ]
 
 
