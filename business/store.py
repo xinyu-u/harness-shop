@@ -5,6 +5,7 @@
 """
 
 import sqlite3
+import threading
 import time
 from abc import ABC, abstractmethod
 
@@ -303,6 +304,7 @@ class SqliteStore(Store):
     """
 
     def __init__(self, db_path: str = "shop.db"):
+        self._lock = threading.RLock()
         # check_same_thread=False：FastAPI 多线程访问需要（否则 sqlite3 报跨线程错）
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_db()
@@ -428,308 +430,324 @@ class SqliteStore(Store):
         self._conn.commit()
 
     def check_stock(self, product_id, size):
-        # 查可用量前先惰性释放过期预占，保证 available 准确（步骤4）
-        self.release_expired_orders()
-        row = self._conn.execute(
-            "SELECT qty, locked FROM inventory WHERE product_id = ? AND size = ?",
-            (product_id, size),
-        ).fetchone()
-        # available = qty - locked；fetchone 返回 (qty, locked) 或 None
-        return (row[0] - row[1]) if row else 0
+        with self._lock:
+            # 查可用量前先惰性释放过期预占，保证 available 准确（步骤4）
+            self.release_expired_orders()
+            row = self._conn.execute(
+                "SELECT qty, locked FROM inventory WHERE product_id = ? AND size = ?",
+                (product_id, size),
+            ).fetchone()
+            # available = qty - locked；fetchone 返回 (qty, locked) 或 None
+            return (row[0] - row[1]) if row else 0
 
     def get_product(self, product_id):
-        row = self._conn.execute(
-            "SELECT id, name, price, category FROM products WHERE id = ?",
-            (product_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        # 元组 -> dict，字段名对齐 MemoryStore 的返回格式
-        return {"id": row[0], "name": row[1], "price": row[2], "category": row[3]}
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, name, price, category FROM products WHERE id = ?",
+                (product_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            # 元组 -> dict，字段名对齐 MemoryStore 的返回格式
+            return {"id": row[0], "name": row[1], "price": row[2], "category": row[3]}
 
     def search_products(self, keyword):
-        # LIKE 模糊匹配：%keyword% 表示"包含即命中"
-        # SQLite 的 LIKE 对 ASCII 默认不分大小写；中文字符无大小写之分，直接传原串即可
-        pattern = f"%{keyword}%"
-        rows = self._conn.execute(
-            "SELECT id, name, price, category FROM products WHERE name LIKE ? OR id LIKE ?",
-            (pattern, pattern),
-        ).fetchall()
-        return [
-            {"id": r[0], "name": r[1], "price": r[2], "category": r[3]}
-            for r in rows
-        ]
+        with self._lock:
+            # LIKE 模糊匹配：%keyword% 表示"包含即命中"
+            # SQLite 的 LIKE 对 ASCII 默认不分大小写；中文字符无大小写之分，直接传原串即可
+            pattern = f"%{keyword}%"
+            rows = self._conn.execute(
+                "SELECT id, name, price, category FROM products WHERE name LIKE ? OR id LIKE ?",
+                (pattern, pattern),
+            ).fetchall()
+            return [
+                {"id": r[0], "name": r[1], "price": r[2], "category": r[3]}
+                for r in rows
+            ]
 
     def recommend_size(self, height, weight, category):
-        # 范围查询：身高在 [h_min, h_max)，体重在 [w_min, w_max]
-        # 区间边界和 MemoryStore 完全一致：h 是左闭右开，w 是双闭
-        row = self._conn.execute(
-            """
-            SELECT size FROM size_chart
-            WHERE category = ?
-              AND h_min <= ? AND ? < h_max
-              AND w_min <= ? AND ? <= w_max
-            """,
-            (category, height, height, weight, weight),
-        ).fetchone()
-        return row[0] if row else None
+        with self._lock:
+            # 范围查询：身高在 [h_min, h_max)，体重在 [w_min, w_max]
+            # 区间边界和 MemoryStore 完全一致：h 是左闭右开，w 是双闭
+            row = self._conn.execute(
+                """
+                SELECT size FROM size_chart
+                WHERE category = ?
+                  AND h_min <= ? AND ? < h_max
+                  AND w_min <= ? AND ? <= w_max
+                """,
+                (category, height, height, weight, weight),
+            ).fetchone()
+            return row[0] if row else None
 
     def create_order(self, product_id, size, qty, user_id, request_id=None):
-        # 路径A（直接下单，旧）：一步扣 qty + 建 created 订单。新流程走 create_draft_order。
-        # ⓪ 幂等预检：相同 request_id 已下过单 → 直接返回原订单
-        # 这能拦截"客户端重发"的绝大多数场景（顺序到达的重复请求）
-        if request_id is not None:
-            row = self._conn.execute(
-                "SELECT id FROM orders WHERE request_id = ?", (request_id,)
-            ).fetchone()
-            if row is not None:
-                return self.get_order(row[0])
+        with self._lock:
+            # 路径A（直接下单，旧）：一步扣 qty + 建 created 订单。新流程走 create_draft_order。
+            # ⓪ 幂等预检：相同 request_id 已下过单 → 直接返回原订单
+            # 这能拦截"客户端重发"的绝大多数场景（顺序到达的重复请求）
+            if request_id is not None:
+                row = self._conn.execute(
+                    "SELECT id FROM orders WHERE request_id = ?", (request_id,)
+                ).fetchone()
+                if row is not None:
+                    return self.get_order(row[0])
 
-        try:
-            # ① 原子检查 + 扣库存（同 B4①，防超卖）
-            cur = self._conn.execute(
-                "UPDATE inventory SET qty = qty - ? "
-                "WHERE product_id = ? AND size = ? AND qty >= ?",
-                (qty, product_id, size, qty),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"库存不足: {product_id} {size}")
+            try:
+                # ① 原子检查 + 扣库存（同 B4①，防超卖）
+                cur = self._conn.execute(
+                    "UPDATE inventory SET qty = qty - ? "
+                    "WHERE product_id = ? AND size = ? AND qty >= ?",
+                    (qty, product_id, size, qty),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"库存不足: {product_id} {size}")
 
-            # ② 插订单（带 request_id；唯一索引兜底防并发重复）
-            cur2 = self._conn.execute(
-                "INSERT INTO orders (product_id, size, qty, user_id, status, request_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (product_id, size, qty, user_id, "created", request_id),
-            )
-            new_id = cur2.lastrowid
+                # ② 插订单（带 request_id；唯一索引兜底防并发重复）
+                cur2 = self._conn.execute(
+                    "INSERT INTO orders (product_id, size, qty, user_id, status, request_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (product_id, size, qty, user_id, "created", request_id),
+                )
+                new_id = cur2.lastrowid
 
-            self._conn.commit()
+                self._conn.commit()
 
-            return {
-                "id": new_id,
-                "product_id": product_id, "size": size, "qty": qty,
-                "user_id": user_id, "status": "created",
-            }
-        except sqlite3.IntegrityError:
-            # 并发兜底：两个相同 request_id 几乎同时到达
-            #   - 都通过了 ⓪ 预检（彼此还没 commit，互相看不到）
-            #   - 都跑 UPDATE 扣库存（数据库锁串行化）
-            #   - 都跑 INSERT，但唯一索引只允许一个成功
-            #   - 失败那个落到这里：rollback 撤销自己刚才的库存扣减
-            #     然后回头查"赢家"那条订单，返回给调用方
-            self._conn.rollback()
-            row = self._conn.execute(
-                "SELECT id FROM orders WHERE request_id = ?", (request_id,)
-            ).fetchone()
-            if row is not None:
-                return self.get_order(row[0])
-            raise   # 不该走到这——除非 IntegrityError 来自别的约束
-        except Exception:
-            self._conn.rollback()
-            raise
+                return {
+                    "id": new_id,
+                    "product_id": product_id, "size": size, "qty": qty,
+                    "user_id": user_id, "status": "created",
+                }
+            except sqlite3.IntegrityError:
+                # 并发兜底：两个相同 request_id 几乎同时到达
+                #   - 都通过了 ⓪ 预检（彼此还没 commit，互相看不到）
+                #   - 都跑 UPDATE 扣库存（数据库锁串行化）
+                #   - 都跑 INSERT，但唯一索引只允许一个成功
+                #   - 失败那个落到这里：rollback 撤销自己刚才的库存扣减
+                #     然后回头查"赢家"那条订单，返回给调用方
+                self._conn.rollback()
+                row = self._conn.execute(
+                    "SELECT id FROM orders WHERE request_id = ?", (request_id,)
+                ).fetchone()
+                if row is not None:
+                    return self.get_order(row[0])
+                raise   # 不该走到这——除非 IntegrityError 来自别的约束
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def get_order(self, order_id):
-        row = self._conn.execute(
-            "SELECT id, product_id, size, qty, user_id, status FROM orders WHERE id = ?",
-            (order_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "id": row[0], "product_id": row[1], "size": row[2],
-            "qty": row[3], "user_id": row[4], "status": row[5],
-        }
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, product_id, size, qty, user_id, status FROM orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0], "product_id": row[1], "size": row[2],
+                "qty": row[3], "user_id": row[4], "status": row[5],
+            }
 
     def cancel_order(self, order_id):
-        order = self.get_order(order_id)
-        if order is None:
-            return False
-        if order["status"] == "cancelled":
-            return False   # 已经取消过了，避免重复退库存
+        with self._lock:
+            order = self.get_order(order_id)
+            if order is None:
+                return False
+            if order["status"] == "cancelled":
+                return False   # 已经取消过了，避免重复退库存
 
-        # 库存在两个不同的"位置"，取消时要退回正确的位置：
-        #   pending（草稿）         → 库存还在 locked 预占着，从没真扣 → 释放 locked
-        #   created / confirmed    → 库存已从 qty 真扣 → 退回 qty
-        if order["status"] == "pending":
+            # 库存在两个不同的"位置"，取消时要退回正确的位置：
+            #   pending（草稿）         → 库存还在 locked 预占着，从没真扣 → 释放 locked
+            #   created / confirmed    → 库存已从 qty 真扣 → 退回 qty
+            if order["status"] == "pending":
+                self._conn.execute(
+                    "UPDATE inventory SET locked = locked - ? WHERE product_id = ? AND size = ?",
+                    (order["qty"], order["product_id"], order["size"]),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE inventory SET qty = qty + ? WHERE product_id = ? AND size = ?",
+                    (order["qty"], order["product_id"], order["size"]),
+                )
             self._conn.execute(
-                "UPDATE inventory SET locked = locked - ? WHERE product_id = ? AND size = ?",
-                (order["qty"], order["product_id"], order["size"]),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE inventory SET qty = qty + ? WHERE product_id = ? AND size = ?",
-                (order["qty"], order["product_id"], order["size"]),
-            )
-        self._conn.execute(
-            "UPDATE orders SET status = 'cancelled' WHERE id = ?",
-            (order_id,),
-        )
-        self._conn.commit()
-        return True
-
-    # ---- 草稿订单 / 预占库存（步骤1）----
-    def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900):
-        try:
-            # ① 原子预占：available(qty-locked) 够才 locked+qty，防超卖
-            cur = self._conn.execute(
-                "UPDATE inventory SET locked = locked + ? "
-                "WHERE product_id = ? AND size = ? AND qty - locked >= ?",
-                (qty, product_id, size, qty),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"库存不足: {product_id} {size}")
-
-            # ② 建 pending 草稿，记过期时间
-            expires_at = time.time() + ttl_seconds
-            cur2 = self._conn.execute(
-                "INSERT INTO orders (product_id, size, qty, user_id, status, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (product_id, size, qty, user_id, "pending", expires_at),
-            )
-            new_id = cur2.lastrowid
-            self._conn.commit()
-            return {
-                "id": new_id,
-                "product_id": product_id, "size": size, "qty": qty,
-                "user_id": user_id, "status": "pending",
-                "expires_at": expires_at,
-            }
-        except ValueError:
-            self._conn.rollback()
-            raise
-        except Exception:
-            self._conn.rollback()
-            raise
-
-    def confirm_draft_order(self, draft_id, user_id):
-        # 先惰性释放过期草稿：若本草稿已过期，会在此被置为 cancelled（步骤4）
-        self.release_expired_orders()
-        order = self.get_order(draft_id)
-        if order is None:
-            return None, "订单不存在"
-        if order["user_id"] != user_id:
-            return None, "无权确认此订单"
-        if order["status"] == "confirmed":
-            return order, None          # 幂等：已确认过，不重复扣
-        if order["status"] != "pending":
-            return None, "订单已取消或已过期"
-        try:
-            # 预占转真扣：qty 真减 + locked 归还（available 不变，预占时已扣过）
-            self._conn.execute(
-                "UPDATE inventory SET qty = qty - ?, locked = locked - ? "
-                "WHERE product_id = ? AND size = ?",
-                (order["qty"], order["qty"], order["product_id"], order["size"]),
-            )
-            self._conn.execute(
-                "UPDATE orders SET status = 'confirmed' WHERE id = ?", (draft_id,)
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-        order["status"] = "confirmed"
-        return order, None
-
-    def release_expired_orders(self):
-        now = time.time()
-        # 找出所有过期的 pending 草稿
-        rows = self._conn.execute(
-            "SELECT id, product_id, size, qty FROM orders "
-            "WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
-            (now,),
-        ).fetchall()
-        for _id, product_id, size, qty in rows:
-            # 释放预占 + 取消草稿
-            self._conn.execute(
-                "UPDATE inventory SET locked = locked - ? WHERE product_id = ? AND size = ?",
-                (qty, product_id, size),
-            )
-            self._conn.execute(
-                "UPDATE orders SET status = 'cancelled' WHERE id = ?", (_id,)
-            )
-        if rows:
-            self._conn.commit()
-        return len(rows)
-
-    # ---- 账号 ----
-    def create_user(self, user_id, password_hash, role="user"):
-        # user_id 统一小写：注册和登录走同一规则
-        uid = user_id.lower()
-        try:
-            self._conn.execute(
-                "INSERT INTO users (user_id, password_hash, role) VALUES (?, ?, ?)",
-                (uid, password_hash, role),
-            )
-            self._conn.commit()
-        except sqlite3.IntegrityError:
-            raise ValueError(f"用户已存在: {uid}")
-
-    def get_user(self, user_id):
-        row = self._conn.execute(
-            "SELECT user_id, password_hash, role FROM users WHERE user_id = ?",
-            (user_id.lower(),),
-        ).fetchone()
-        if row is None:
-            return None
-        return {"user_id": row[0], "password_hash": row[1], "role": row[2]}
-
-    # ---- 商家工具 ----
-    def set_price(self, product_id, price):
-        cur = self._conn.execute(
-            "UPDATE products SET price = ? WHERE id = ?",
-            (price, product_id),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    def add_product(self, product_id, name, price, category):
-        try:
-            self._conn.execute(
-                "INSERT INTO products (id, name, price, category) VALUES (?, ?, ?, ?)",
-                (product_id, name, price, category),
+                "UPDATE orders SET status = 'cancelled' WHERE id = ?",
+                (order_id,),
             )
             self._conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False   # 主键冲突 → 商品已存在
+
+    # ---- 草稿订单 / 预占库存（步骤1）----
+    def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900):
+        with self._lock:
+            try:
+                # ① 原子预占：available(qty-locked) 够才 locked+qty，防超卖
+                cur = self._conn.execute(
+                    "UPDATE inventory SET locked = locked + ? "
+                    "WHERE product_id = ? AND size = ? AND qty - locked >= ?",
+                    (qty, product_id, size, qty),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"库存不足: {product_id} {size}")
+
+                # ② 建 pending 草稿，记过期时间
+                expires_at = time.time() + ttl_seconds
+                cur2 = self._conn.execute(
+                    "INSERT INTO orders (product_id, size, qty, user_id, status, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (product_id, size, qty, user_id, "pending", expires_at),
+                )
+                new_id = cur2.lastrowid
+                self._conn.commit()
+                return {
+                    "id": new_id,
+                    "product_id": product_id, "size": size, "qty": qty,
+                    "user_id": user_id, "status": "pending",
+                    "expires_at": expires_at,
+                }
+            except ValueError:
+                self._conn.rollback()
+                raise
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def confirm_draft_order(self, draft_id, user_id):
+        with self._lock:
+            # 先惰性释放过期草稿：若本草稿已过期，会在此被置为 cancelled（步骤4）
+            self.release_expired_orders()
+            order = self.get_order(draft_id)
+            if order is None:
+                return None, "订单不存在"
+            if order["user_id"] != user_id:
+                return None, "无权确认此订单"
+            if order["status"] == "confirmed":
+                return order, None          # 幂等：已确认过，不重复扣
+            if order["status"] != "pending":
+                return None, "订单已取消或已过期"
+            try:
+                # 预占转真扣：qty 真减 + locked 归还（available 不变，预占时已扣过）
+                self._conn.execute(
+                    "UPDATE inventory SET qty = qty - ?, locked = locked - ? "
+                    "WHERE product_id = ? AND size = ?",
+                    (order["qty"], order["qty"], order["product_id"], order["size"]),
+                )
+                self._conn.execute(
+                    "UPDATE orders SET status = 'confirmed' WHERE id = ?", (draft_id,)
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            order["status"] = "confirmed"
+            return order, None
+
+    def release_expired_orders(self):
+        with self._lock:
+            now = time.time()
+            # 找出所有过期的 pending 草稿
+            rows = self._conn.execute(
+                "SELECT id, product_id, size, qty FROM orders "
+                "WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
+                (now,),
+            ).fetchall()
+            for _id, product_id, size, qty in rows:
+                # 释放预占 + 取消草稿
+                self._conn.execute(
+                    "UPDATE inventory SET locked = locked - ? WHERE product_id = ? AND size = ?",
+                    (qty, product_id, size),
+                )
+                self._conn.execute(
+                    "UPDATE orders SET status = 'cancelled' WHERE id = ?", (_id,)
+                )
+            if rows:
+                self._conn.commit()
+            return len(rows)
+
+    # ---- 账号 ----
+    def create_user(self, user_id, password_hash, role="user"):
+        with self._lock:
+            # user_id 统一小写：注册和登录走同一规则
+            uid = user_id.lower()
+            try:
+                self._conn.execute(
+                    "INSERT INTO users (user_id, password_hash, role) VALUES (?, ?, ?)",
+                    (uid, password_hash, role),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                raise ValueError(f"用户已存在: {uid}")
+
+    def get_user(self, user_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_id, password_hash, role FROM users WHERE user_id = ?",
+                (user_id.lower(),),
+            ).fetchone()
+            if row is None:
+                return None
+            return {"user_id": row[0], "password_hash": row[1], "role": row[2]}
+
+    # ---- 商家工具 ----
+    def set_price(self, product_id, price):
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE products SET price = ? WHERE id = ?",
+                (price, product_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def add_product(self, product_id, name, price, category):
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO products (id, name, price, category) VALUES (?, ?, ?, ?)",
+                    (product_id, name, price, category),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False   # 主键冲突 → 商品已存在
 
     def restock(self, product_id, size, add_qty):
-        # 增量补货：qty += add_qty（原子自增，不覆写绝对值）。商品不存在 → None。
-        # 该 (product_id, size) 还没有库存行 → 新建（从 0 起补）。只动 qty，不碰 locked。
-        if self._conn.execute(
-            "SELECT 1 FROM products WHERE id = ?", (product_id,)
-        ).fetchone() is None:
-            return None
-        try:
-            cur = self._conn.execute(
-                "UPDATE inventory SET qty = qty + ? WHERE product_id = ? AND size = ?",
-                (add_qty, product_id, size),
-            )
-            if cur.rowcount == 0:
-                # 没有该尺码的库存行：新建（locked 走默认 0）
-                self._conn.execute(
-                    "INSERT INTO inventory (product_id, size, qty) VALUES (?, ?, ?)",
-                    (product_id, size, add_qty),
+        with self._lock:
+            # 增量补货：qty += add_qty（原子自增，不覆写绝对值）。商品不存在 → None。
+            # 该 (product_id, size) 还没有库存行 → 新建（从 0 起补）。只动 qty，不碰 locked。
+            if self._conn.execute(
+                "SELECT 1 FROM products WHERE id = ?", (product_id,)
+            ).fetchone() is None:
+                return None
+            try:
+                cur = self._conn.execute(
+                    "UPDATE inventory SET qty = qty + ? WHERE product_id = ? AND size = ?",
+                    (add_qty, product_id, size),
                 )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-        row = self._conn.execute(
-            "SELECT qty FROM inventory WHERE product_id = ? AND size = ?",
-            (product_id, size),
-        ).fetchone()
-        return row[0]
+                if cur.rowcount == 0:
+                    # 没有该尺码的库存行：新建（locked 走默认 0）
+                    self._conn.execute(
+                        "INSERT INTO inventory (product_id, size, qty) VALUES (?, ?, ?)",
+                        (product_id, size, add_qty),
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            row = self._conn.execute(
+                "SELECT qty FROM inventory WHERE product_id = ? AND size = ?",
+                (product_id, size),
+            ).fetchone()
+            return row[0]
 
     # ---- 聊天档案 ----
     def save_message(self, user_id, role, content):
-        # user_id 归一化小写，和账号一致（注册/登录同规则）
-        self._conn.execute(
-            "INSERT INTO chat_messages (user_id, role, content, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (user_id.lower(), role, content, time.time()),
-        )
-        self._conn.commit()
+        with self._lock:
+            # user_id 归一化小写，和账号一致（注册/登录同规则）
+            self._conn.execute(
+                "INSERT INTO chat_messages (user_id, role, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id.lower(), role, content, time.time()),
+            )
+            self._conn.commit()
 
     def get_messages(self, user_id, limit=20, before=None):
         """取最近 limit 条（倒序取），反转成正序返回（前端按对话顺序显示）。
@@ -737,25 +755,26 @@ class SqliteStore(Store):
         before=游标（上一页最早一条的 created_at），取更早的，用于上拉加载。
         ORDER BY 加 id DESC 兜底：同一时间戳的多条也有稳定顺序。
         """
-        uid = user_id.lower()
-        if before is None:
-            rows = self._conn.execute(
-                "SELECT role, content, created_at FROM chat_messages "
-                "WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
-                (uid, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT role, content, created_at FROM chat_messages "
-                "WHERE user_id = ? AND created_at < ? "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (uid, before, limit),
-            ).fetchall()
-        # 倒序取最近，reversed 成正序
-        return [
-            {"role": r[0], "content": r[1], "created_at": r[2]}
-            for r in reversed(rows)
-        ]
+        with self._lock:
+            uid = user_id.lower()
+            if before is None:
+                rows = self._conn.execute(
+                    "SELECT role, content, created_at FROM chat_messages "
+                    "WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (uid, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT role, content, created_at FROM chat_messages "
+                    "WHERE user_id = ? AND created_at < ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (uid, before, limit),
+                ).fetchall()
+            # 倒序取最近，reversed 成正序
+            return [
+                {"role": r[0], "content": r[1], "created_at": r[2]}
+                for r in reversed(rows)
+            ]
 
     def close(self):
         self._conn.close()
