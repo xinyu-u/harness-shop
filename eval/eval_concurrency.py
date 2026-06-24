@@ -173,19 +173,20 @@ def scenario_confirm_vs_cancel() -> Outcome:
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs = [ex.submit(do_confirm), ex.submit(do_cancel)]
             outs = {}
+            errors = []        # 用列表收异常：两 future 同错时不会因 dict 键碰撞丢一个
             for f in futs:
                 try:
                     k, v = f.result()
                     outs[k] = v
                 except Exception as exc:
-                    outs[str(exc)[:30]] = False
+                    errors.append(str(exc)[:30])
 
         qty = _raw(store, "qty", "airmax", "42")
         locked = _raw(store, "locked", "airmax", "42")
         status = store.get_order(did)["status"]
 
-        print(f"    diag confirm-vs-cancel: {outs} | qty={qty} locked={locked} "
-              f"status={status} seed={seed}")
+        print(f"    diag confirm-vs-cancel: {outs} errors={errors} | "
+              f"qty={qty} locked={locked} status={status} seed={seed}")
 
         ok = (
             locked == 0
@@ -223,6 +224,8 @@ def scenario_mixed_ledger(n=12) -> Outcome:
 
         with ThreadPoolExecutor(max_workers=n) as ex:
             ids = [oid for oid in ex.map(mk, range(n)) if oid is not None]
+        attempted = n
+        created = len(ids)
 
         def act(pair):
             idx, oid = pair
@@ -244,7 +247,13 @@ def scenario_mixed_ledger(n=12) -> Outcome:
         qty = _raw(store, "qty", "airmax", "42")
         locked = _raw(store, "locked", "airmax", "42")
 
-        print(f"    diag mixed-ledger: drafts={len(ids)} agg={agg} | "
+        # 全员建草稿失败 → ids 空，账本不变量会被空值平凡满足。空跑不能算 PASS。
+        if created == 0:
+            print(f"    diag mixed-ledger: drafts=0/{attempted} agg={agg} | "
+                  f"qty={qty} locked={locked} base={base} | NO DRAFTS CREATED")
+            return Outcome.FAIL
+
+        print(f"    diag mixed-ledger: drafts={created}/{attempted} agg={agg} | "
               f"qty={qty} locked={locked} base={base}")
 
         ok = (
