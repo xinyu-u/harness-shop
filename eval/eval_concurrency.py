@@ -172,7 +172,13 @@ def scenario_confirm_vs_cancel() -> Outcome:
 
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs = [ex.submit(do_confirm), ex.submit(do_cancel)]
-            outs = dict(f.result() for f in futs)
+            outs = {}
+            for f in futs:
+                try:
+                    k, v = f.result()
+                    outs[k] = v
+                except Exception as exc:
+                    outs[str(exc)[:30]] = False
 
         qty = _raw(store, "qty", "airmax", "42")
         locked = _raw(store, "locked", "airmax", "42")
@@ -196,10 +202,70 @@ def scenario_confirm_vs_cancel() -> Outcome:
             pass
 
 
+# ───────────────────────── 场景4：混合并发·账本对账 ─────────────────────────
+def scenario_mixed_ledger(n=12) -> Outcome:
+    """先补足库存（避免被超卖瓶颈干扰，本场景测的是账本一致性），并发建 n 张草稿，
+    再并发对每张草稿 confirm（偶数）/ cancel（奇数）。
+    不变量（任何合法串行化都应成立）：
+        inventory.locked == 所有 pending 订单 qty 之和
+        inventory.qty    == base - 所有 confirmed 订单 qty 之和
+        locked>=0、qty>=0、qty-locked>=0"""
+    store, path = _fresh_sqlite()
+    try:
+        store.restock("airmax", "42", 100)               # 库存充足，专测对账
+        base = _raw(store, "qty", "airmax", "42")         # seed + 100
+
+        def mk(i):
+            try:
+                return store.create_draft_order("airmax", "42", 1, "alice")["id"]
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            ids = [oid for oid in ex.map(mk, range(n)) if oid is not None]
+
+        def act(pair):
+            idx, oid = pair
+            try:
+                if idx % 2 == 0:
+                    store.confirm_draft_order(oid, "alice")
+                else:
+                    store.cancel_order(oid)
+            except Exception:
+                pass
+
+        if ids:
+            with ThreadPoolExecutor(max_workers=len(ids)) as ex:
+                list(ex.map(act, list(enumerate(ids))))
+
+        agg = _status_qty(store, "airmax", "42")
+        pending_qty = agg.get("pending", 0)
+        confirmed_qty = agg.get("confirmed", 0)
+        qty = _raw(store, "qty", "airmax", "42")
+        locked = _raw(store, "locked", "airmax", "42")
+
+        print(f"    diag mixed-ledger: drafts={len(ids)} agg={agg} | "
+              f"qty={qty} locked={locked} base={base}")
+
+        ok = (
+            locked == pending_qty
+            and qty == base - confirmed_qty
+            and locked >= 0 and qty >= 0 and (qty - locked) >= 0
+        )
+        return Outcome.PASS if ok else Outcome.FAIL
+    finally:
+        store.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 SCENARIOS = [
     ("场景1·草稿不超卖（20线程抢库存5）", scenario_oversell_draft),
     ("场景2·确认幂等只扣一次（20线程确认同一草稿）", scenario_confirm_idempotent),
     ("场景3·confirm vs cancel 竞态（库存完整性）", scenario_confirm_vs_cancel),
+    ("场景4·混合并发账本对账（建/确认/取消）", scenario_mixed_ledger),
 ]
 
 
