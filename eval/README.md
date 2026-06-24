@@ -96,14 +96,28 @@ python -m eval.eval_tool_selection --trials 3   # 复测命令；若三对仍 10
 > `engine.py` 吞成兜底文案所致（非模型选错），数据作废——看到大面积 FAIL 且
 > 工具列为 `-` 时，先查是不是 API 异常而非模型行为。
 
-### 2026-06-23 · 并发安全套件（待填实测）
+### 2026-06-23 · 并发安全套件（实测：现有 store.py 全线挂）
 
 `eval_concurrency.py` 复现 server.py 的「单连接跨线程共享」并断言并发不变量
 （不超卖 / 确认幂等 / confirm-cancel 完整性 / 账本对账 / restock 原子）。
 
 > 单连接在事务边界上本就不安全（一个 commit/rollback 作用于整个连接，会波及其它线程
-> 未提交的写），所以本套件**可能在现有 store.py 上跑出真实 FAIL**——那是 eval 在干活。
+> 未提交的写），所以本套件**在现有 store.py 上跑出真实 FAIL**——那是 eval 在干活。
 > 修复（每请求一连接 / 序列化写锁）是独立后续，不在本 eval 范围。
 
-**实测结果（待补）：** `python -m eval.eval_concurrency --rounds 5` 的逐场景 PASS/FAIL +
-诊断桶（success / rejected / locked / other）贴这里。
+**实测结果**（`python -m eval.eval_concurrency --rounds 5`，**通过率 12%(3/25)，5 个场景全 FAIL**）：
+
+| 场景 | 轮通过 | 暴露的真实 bug（诊断摘录） |
+|---|---|---|
+| 1 草稿不超卖 | 2/5 | **真超卖**：`pending_rows=7 > seed=5`（5 件库存生成 7 张订单）；locked 与订单数脱钩 |
+| 2 确认幂等 | 0/5 | **库存扣穿**：20 线程确认同一草稿 → `qty=0 locked=-2`（本该只扣 1 次，扣成负） |
+| 3 confirm vs cancel | 0/5 | **跨层撒谎**：每轮 `{confirm:True, cancel:True}` 同时返回成功，终态 cancelled、`locked=-1` |
+| 4 混合账本对账 | 1/5 | **账不平**：`locked=-1/-2`、`locked != pending_qty` |
+| 5 restock 原子 | 0/5 | **丢失更新**：`ok=11 但 qty 只到 12，expected=16`（成功的补货被吞） |
+
+> 根因不在某行 SQL（`UPDATE ... WHERE qty>=?` 单看都对），而在「单连接跨线程」这个架构假设：
+> 一个连接只有一个事务上下文，A 未提交的写会被 B 的 commit/rollback 连带处理掉，于是丢更新 /
+> 负库存 / 偶发 `sqlite InterfaceError`。Code review 看不出，压上真并发才现形。
+>
+> **修复验收标准**：把这 5 条不变量当验收线，改 store.py（每请求一连接 / 序列化写锁），
+> 直到 `--rounds 5` 稳定 100%。
