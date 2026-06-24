@@ -150,9 +150,56 @@ def scenario_confirm_idempotent(n_threads=20) -> Outcome:
             pass
 
 
+# ───────────────────────── 场景3：confirm vs cancel 竞态 ─────────────────────────
+def scenario_confirm_vs_cancel() -> Outcome:
+    """同一草稿，confirm 与 cancel 并发。判定用【库存完整性】——它天然把
+    "合法的确认后退款"（confirm 成功后 cancel 退回，终态 cancelled、qty 复原、locked=0）
+    与"竞态损坏"（两者都读到 pending → confirm 扣完、cancel 又按 pending 分支把 locked 减成负）
+    区分开：损坏一定表现为 locked!=0 或 qty 越界。
+    不变量：locked==0；status∈{confirmed,cancelled}；
+            confirmed → qty==seed-1（扣一次保留）；cancelled → qty==seed（净零，没扣或扣后退）。"""
+    store, path = _fresh_sqlite()
+    try:
+        seed = _raw(store, "qty", "airmax", "42")
+        did = store.create_draft_order("airmax", "42", 1, "alice")["id"]
+
+        def do_confirm():
+            order, err = store.confirm_draft_order(did, "alice")
+            return ("confirm", err is None and order is not None)
+
+        def do_cancel():
+            return ("cancel", store.cancel_order(did))
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = [ex.submit(do_confirm), ex.submit(do_cancel)]
+            outs = dict(f.result() for f in futs)
+
+        qty = _raw(store, "qty", "airmax", "42")
+        locked = _raw(store, "locked", "airmax", "42")
+        status = store.get_order(did)["status"]
+
+        print(f"    diag confirm-vs-cancel: {outs} | qty={qty} locked={locked} "
+              f"status={status} seed={seed}")
+
+        ok = (
+            locked == 0
+            and status in ("confirmed", "cancelled")
+            and ((status == "confirmed" and qty == seed - 1)
+                 or (status == "cancelled" and qty == seed))
+        )
+        return Outcome.PASS if ok else Outcome.FAIL
+    finally:
+        store.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 SCENARIOS = [
     ("场景1·草稿不超卖（20线程抢库存5）", scenario_oversell_draft),
     ("场景2·确认幂等只扣一次（20线程确认同一草稿）", scenario_confirm_idempotent),
+    ("场景3·confirm vs cancel 竞态（库存完整性）", scenario_confirm_vs_cancel),
 ]
 
 
