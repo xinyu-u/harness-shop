@@ -261,11 +261,45 @@ def scenario_mixed_ledger(n=12) -> Outcome:
             pass
 
 
+# ───────────────────────── 场景5：restock 原子自增 ─────────────────────────
+def scenario_restock_atomic(n=20) -> Outcome:
+    """N 线程并发 restock(add_qty=1)。
+    不变量：末态 qty == seed + 返回成功的次数（每次成功恰好 +1）。
+    丢失更新（某线程的 +1 被别的线程 commit/rollback 抹掉）会让 qty < seed + 成功数 → FAIL。
+    无锁冲突时成功数应为 N，qty == seed + N。"""
+    store, path = _fresh_sqlite()
+    try:
+        seed = _raw(store, "qty", "airmax", "42")
+
+        def bump():
+            store.restock("airmax", "42", 1)
+            return True
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            tags = list(ex.map(lambda _: _classify(bump), range(n)))
+
+        buckets = {k: tags.count(k) for k in ("ok", "rejected", "locked", "other")}
+        qty = _raw(store, "qty", "airmax", "42")
+
+        print(f"    diag restock: {buckets} | qty={qty} seed={seed} "
+              f"expected={seed + buckets['ok']}")
+
+        ok = (qty == seed + buckets["ok"])
+        return Outcome.PASS if ok else Outcome.FAIL
+    finally:
+        store.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 SCENARIOS = [
     ("场景1·草稿不超卖（20线程抢库存5）", scenario_oversell_draft),
     ("场景2·确认幂等只扣一次（20线程确认同一草稿）", scenario_confirm_idempotent),
     ("场景3·confirm vs cancel 竞态（库存完整性）", scenario_confirm_vs_cancel),
     ("场景4·混合并发账本对账（建/确认/取消）", scenario_mixed_ledger),
+    ("场景5·restock 原子自增（20线程并发补货）", scenario_restock_atomic),
 ]
 
 
