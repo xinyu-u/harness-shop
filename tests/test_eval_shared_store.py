@@ -19,6 +19,8 @@ def test_injected_store_is_reused_and_not_closed_on_cleanup():
         assert trace.store is store
         # cleanup 不应关闭共享 store：cleanup 后仍可查询
         trace.cleanup()
+        # 5 是 airmax/42 的 seed 库存；真正要验证的是"连接没被关"（仍能查询），
+        # 具体数值只是顺带确认 seed 库可读。
         assert store.check_stock("airmax", "42") == 5
     finally:
         store.close()

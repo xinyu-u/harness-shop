@@ -125,7 +125,10 @@ def make_client(fake_script=None, force_fake: bool = False):
 async def run_case(prompt, role="user",
                    client=None, fake_script=None, force_fake=False, setup=None,
                    store=None) -> Trace:
-    """在一个全新临时 sqlite 上跑真实对话循环，返回 Trace（store 仍打开，供判定函数读）。
+    """在一个 sqlite 上跑真实对话循环，返回 Trace（store 仍打开，供判定函数读）。
+
+    若不传 store，自建全新临时 sqlite（cleanup 负责关+删）；若传入共享 store，则复用它，
+    cleanup 不关——由调用方统一关闭。
 
     复现前端 web 流程：confirm=None——写操作不经 CLI 式确认回调，
     安全完全由「角色门禁（schema 过滤 + 执行兜底）」+「草稿状态机（place_order 只锁不扣，
