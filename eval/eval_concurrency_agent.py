@@ -58,8 +58,13 @@ def main():
     traces = []
     try:
         with ThreadPoolExecutor(max_workers=args.buyers) as ex:
-            traces = list(ex.map(lambda _: _run_one(store, prompt, smoke),
-                                 range(args.buyers)))
+            try:
+                traces = list(ex.map(lambda _: _run_one(store, prompt, smoke),
+                                     range(args.buyers)))
+            except Exception as exc:
+                print(f"buyer 线程抛异常（并发下 store 可能崩了）："
+                      f"{type(exc).__name__}: {exc}")
+                raise
 
         # agent 侧"成功"：place_order 成功执行（executed_ok）
         agent_success = sum(1 for t in traces if t.executed_ok("place_order"))
@@ -85,6 +90,20 @@ def main():
             and qty == seed           # 草稿只锁不扣，真实库存不变
             and locked >= 0
         )
+        if not ok:
+            reasons = []
+            if not (agent_success == pending_rows == pending_qty == locked):
+                reasons.append(f"计数不一致 agent_success={agent_success} "
+                               f"pending_rows={pending_rows} pending_qty={pending_qty} "
+                               f"locked={locked}")
+            if pending_rows > seed:
+                reasons.append(f"超卖 pending_rows={pending_rows} > seed={seed}")
+            if qty != seed:
+                reasons.append(f"qty 被动过 qty={qty} != seed={seed}（草稿应只锁不扣）")
+            if locked < 0:
+                reasons.append(f"locked 为负 locked={locked}")
+            print("  失败原因：" + "；".join(reasons))
+
         rate = 1.0 if ok else 0.0
         print(f"\n不超卖一致性：{'PASS' if ok else 'FAIL'}  阈值 {args.threshold:.0%}")
         print("结果：" + ("达标" if rate >= args.threshold else "未达标"))
