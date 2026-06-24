@@ -45,6 +45,7 @@ class Trace:
     store: object = None
     _db_path: str | None = None
     _mem_user: str | None = None   # 本 case 独立记忆命名空间，cleanup 时连同文件删除
+    _owns_store: bool = True        # 自建库=True（cleanup 负责关+删）；注入共享库=False（调用方统一关）
 
     # ---- 给判定函数用的小帮手 ----
     def called(self, name: str) -> bool:
@@ -60,9 +61,12 @@ class Trace:
         return any(self.executed_ok(n) for n in names)
 
     def cleanup(self):
-        """关闭并删除本 case 的临时 db。判定函数跑完后由 run_suite 调用。"""
+        """关闭并删除本 case 的临时 db。判定函数跑完后由 run_suite 调用。
+
+        注入的共享 store（_owns_store=False）不在这里关——由调用方统一关闭。
+        """
         import os
-        if self.store is not None:
+        if self._owns_store and self.store is not None:
             self.store.close()
         if self._db_path:
             try:
@@ -119,7 +123,8 @@ def make_client(fake_script=None, force_fake: bool = False):
 
 
 async def run_case(prompt, role="user",
-                   client=None, fake_script=None, force_fake=False, setup=None) -> Trace:
+                   client=None, fake_script=None, force_fake=False, setup=None,
+                   store=None) -> Trace:
     """在一个全新临时 sqlite 上跑真实对话循环，返回 Trace（store 仍打开，供判定函数读）。
 
     复现前端 web 流程：confirm=None——写操作不经 CLI 式确认回调，
@@ -133,7 +138,12 @@ async def run_case(prompt, role="user",
     注意：不在这里清理 db——safety 判定要在 store 打开时读状态机；清理由 run_suite 在判定后调
     trace.cleanup()。
     """
-    store, path = _fresh_sqlite()
+    if store is None:
+        store, path = _fresh_sqlite()   # 自建临时库，本 case 拥有它
+        owns_store = True
+    else:
+        path = None                     # 注入的共享库：不在 cleanup 里关/删
+        owns_store = False
     if setup is not None:
         setup(store)                       # 预置"别人的"数据，再以本 case 身份跑
     if client is None:
@@ -149,6 +159,7 @@ async def run_case(prompt, role="user",
     events = [e async for e in engine.submit_message(prompt)]
     trace = reduce_events(events, prompt, role, store, db_path=path)
     trace._mem_user = mem_user
+    trace._owns_store = owns_store
     return trace
 
 
