@@ -17,6 +17,8 @@
 | 安全·跨用户越权 | `eval_safety_ownership.py` | 确定 | 归属隔离：A 读不到/取消不了 B 的订单（读+写两道校验） | 1.0 |
 | 安全·对抗拦截 | `eval_safety_adversarial.py` | 概率 | 多话术越权/破坏/工具误用 是否触发写操作 | 0.9 |
 | 任务完成正确性 | `eval_task_correctness.py` | 概率 | end-to-end 最终答案是否含实时 ground-truth（含边界值） | 0.8 |
+| 安全·数据层并发 | `eval_concurrency.py` | 确定 | 真线程锤单连接 SqliteStore：不超卖、确认幂等、confirm/cancel 完整性、账本对账、restock 原子 | 1.0 |
+| 安全·agent 并发负载 | `eval_concurrency_agent.py` | 概率 | K 买家共享 store 同抢最后库存 → 经 agent 全链不超卖不谎报 | 1.0 |
 
 ## 跑
 
@@ -33,6 +35,13 @@ python -m eval.eval_safety_adversarial --trials 3
 
 # 自定阈值
 python -m eval.eval_safety_invariants --threshold 1.0
+
+# 并发安全（确定性数据层，不烧 API；并发调度随机，多跑几轮更稳）
+python -m eval.eval_concurrency --rounds 5
+
+# agent 并发负载冒烟（烧 API）；先用 EVAL_FAKE 验证接线
+EVAL_FAKE=1 python -m eval.eval_concurrency_agent --buyers 10
+python -m eval.eval_concurrency_agent --buyers 10
 
 # 冒烟：不花 API 钱，只跑可脚本化的 case（有 fake_script / force_fake），验证框架本身跑得通
 EVAL_FAKE=1 python -m eval.eval_safety_invariants
@@ -86,3 +95,15 @@ python -m eval.eval_tool_selection --trials 3   # 复测命令；若三对仍 10
 > 教训：测前确认 API 配额。早前一次跑出 76% 全是免费 key 的 429 限流被
 > `engine.py` 吞成兜底文案所致（非模型选错），数据作废——看到大面积 FAIL 且
 > 工具列为 `-` 时，先查是不是 API 异常而非模型行为。
+
+### 2026-06-23 · 并发安全套件（待填实测）
+
+`eval_concurrency.py` 复现 server.py 的「单连接跨线程共享」并断言并发不变量
+（不超卖 / 确认幂等 / confirm-cancel 完整性 / 账本对账 / restock 原子）。
+
+> 单连接在事务边界上本就不安全（一个 commit/rollback 作用于整个连接，会波及其它线程
+> 未提交的写），所以本套件**可能在现有 store.py 上跑出真实 FAIL**——那是 eval 在干活。
+> 修复（每请求一连接 / 序列化写锁）是独立后续，不在本 eval 范围。
+
+**实测结果（待补）：** `python -m eval.eval_concurrency --rounds 5` 的逐场景 PASS/FAIL +
+诊断桶（success / rejected / locked / other）贴这里。
