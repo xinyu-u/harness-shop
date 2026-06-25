@@ -42,7 +42,7 @@ def test_layer1_memory_rw():
 
 # ───────────────────── 第2层：system_prompt 带上了记忆 ─────────────────────
 
-async def test_layer2_memory_in_system_prompt():
+async def _layer2_memory_in_system_prompt():
     """记忆是否被读出来、拼进 system_prompt、传到 client。"""
     cleanup()
     append_memory("用户穿42码鞋", TEST_USER)
@@ -62,7 +62,7 @@ async def test_layer2_memory_in_system_prompt():
 
 # ───────────────────── 第3层：write_memory 工具能存 ─────────────────────
 
-async def test_layer3_write_memory_tool():
+async def _layer3_write_memory_tool():
     """模型调 write_memory 工具，记忆是否真写进文件。"""
     cleanup()
 
@@ -89,7 +89,7 @@ async def test_layer3_write_memory_tool():
 
 # ───────────────────── 第4层：完整跨会话（写→重启→读到）─────────────────────
 
-async def test_layer4_cross_session():
+async def _layer4_cross_session():
     """模拟两次会话：第1次记住，第2次（新 engine）能想起。"""
     cleanup()
 
@@ -115,11 +115,23 @@ async def test_layer4_cross_session():
     print("✅ 第4层 跨会话：第1次记住 → 新会话（重启）能想起")
 
 
+def test_layer2_memory_in_system_prompt():
+    asyncio.run(_layer2_memory_in_system_prompt())
+
+
+def test_layer3_write_memory_tool():
+    asyncio.run(_layer3_write_memory_tool())
+
+
+def test_layer4_cross_session():
+    asyncio.run(_layer4_cross_session())
+
+
 def main():
     test_layer1_memory_rw()
-    asyncio.run(test_layer2_memory_in_system_prompt())
-    asyncio.run(test_layer3_write_memory_tool())
-    asyncio.run(test_layer4_cross_session())
+    test_layer2_memory_in_system_prompt()
+    test_layer3_write_memory_tool()
+    test_layer4_cross_session()
     cleanup()  # 收尾清理
     print("\n🎉 阶段6 记忆 全部验证通过")
 

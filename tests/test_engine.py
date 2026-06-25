@@ -9,7 +9,7 @@ from business.store import MemoryStore
 from business.cs_tools import build_tools
 
 
-async def test_check_stock_flow():
+async def _check_stock_flow():
     """测：模型决定调 check_stock -> 工具执行 -> 模型收尾回复。"""
     engine = QueryEngine(FakeClient(), build_tools(MemoryStore()))
     events = [e async for e in engine.submit_message("42码有货吗")]
@@ -28,7 +28,7 @@ async def test_check_stock_flow():
     assert any(isinstance(e, AssistantTurnComplete) for e in events), "没有收尾回复"
     print("✅ test_check_stock_flow 通过")
 
-async def test_max_turns():
+async def _max_turns():
     """测保险丝：FakeClient 永远调工具，max_turns 必须拦住。"""
     # 单条脚本=工具调用：stream_message 的 idx 钳到末尾，所以每回合都返回它
     # → 模型"永远调工具、停不下来"，正好压测保险丝。
@@ -50,6 +50,14 @@ async def test_max_turns():
     print("✅ test_max_turns 通过（保险丝有效）")
 
 
+def test_check_stock_flow():
+    asyncio.run(_check_stock_flow())
+
+
+def test_max_turns():
+    asyncio.run(_max_turns())
+
+
 if __name__ == "__main__":
-    asyncio.run(test_check_stock_flow())
-    asyncio.run(test_max_turns())
+    test_check_stock_flow()
+    test_max_turns()

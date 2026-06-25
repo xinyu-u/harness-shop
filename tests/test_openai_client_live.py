@@ -4,11 +4,13 @@ import asyncio
 import os
 import time
 
+import pytest
+
 from core.client import OpenAIClient, _api_timeout
 from core.messages import ConversationMessage, TextBlock
 
 
-async def test_plain_reply():
+async def _plain_reply():
     client = OpenAIClient()
     t0 = time.time()
     reply = await client.stream_message(
@@ -21,7 +23,7 @@ async def test_plain_reply():
     return elapsed
 
 
-async def test_tool_call_intent():
+async def _tool_call_intent():
     tools = [{
         "name": "check_stock",
         "description": "查库存",
@@ -48,11 +50,25 @@ async def test_tool_call_intent():
     return elapsed
 
 
-async def main():
+_NO_KEY = not os.getenv("api_key")
+_SKIP_REASON = "live API 测试：需 .env 配 api_key，离线/CI 默认跳过"
+
+
+@pytest.mark.skipif(_NO_KEY, reason=_SKIP_REASON)
+def test_plain_reply():
+    asyncio.run(_plain_reply())
+
+
+@pytest.mark.skipif(_NO_KEY, reason=_SKIP_REASON)
+def test_tool_call_intent():
+    asyncio.run(_tool_call_intent())
+
+
+def main():
     print(f"timeout={_api_timeout()}s base_url={os.getenv('OPENAI_BASE_URL')}")
-    await test_plain_reply()
-    await test_tool_call_intent()
+    test_plain_reply()
+    test_tool_call_intent()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

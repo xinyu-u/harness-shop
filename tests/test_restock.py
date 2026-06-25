@@ -69,7 +69,7 @@ def test_restock_memorystore_parity():
 
 # ───────── 工具层：报告新库存、拒绝不存在、角色门禁 ─────────
 
-async def test_restock_tool_reports_new_qty():
+async def _restock_tool_reports_new_qty():
     store = SqliteStore(":memory:")
     tool = RestockProductTool(store)
     r = await tool.execute(tool.input_model.model_validate(
@@ -79,7 +79,7 @@ async def test_restock_tool_reports_new_qty():
     print("✅ 工具补货：报告补货后库存")
 
 
-async def test_restock_tool_unknown_product_errors():
+async def _restock_tool_unknown_product_errors():
     store = SqliteStore(":memory:")
     tool = RestockProductTool(store)
     r = await tool.execute(tool.input_model.model_validate(
@@ -95,6 +95,14 @@ def test_restock_is_merchant_only():
     print("✅ 补货工具：is_write + 仅商家")
 
 
+def test_restock_tool_reports_new_qty():
+    asyncio.run(_restock_tool_reports_new_qty())
+
+
+def test_restock_tool_unknown_product_errors():
+    asyncio.run(_restock_tool_unknown_product_errors())
+
+
 def main():
     test_restock_existing_size_increments()
     test_restock_creates_missing_size_row()
@@ -102,8 +110,8 @@ def main():
     test_restock_unknown_product_rejected()
     test_restock_preserves_locked()
     test_restock_memorystore_parity()
-    asyncio.run(test_restock_tool_reports_new_qty())
-    asyncio.run(test_restock_tool_unknown_product_errors())
+    test_restock_tool_reports_new_qty()
+    test_restock_tool_unknown_product_errors()
     test_restock_is_merchant_only()
     print("\n🎉 restock_product 全部验证通过")
 
