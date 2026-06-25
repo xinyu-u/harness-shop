@@ -1,4 +1,16 @@
+"""第二期 SqliteStore 雏形（自带一份精简 Store，不依赖 business/store.py）的数据层验证。
+
+历史背景：这是「字典实现 → SQLite 实现同一接口」学习阶段的最早 sqlite 实验，
+不含 locked/草稿/账号等后续字段，仅验证 下单/库存/取消/持久化 的基本闭环。
+
+每个用例用隔离的库（:memory: 或临时文件），不碰真实 shop.db、互不污染。
+
+跑法（项目根目录）：python -m tests.test_db
+"""
+
+import os
 import sqlite3
+import tempfile
 from abc import ABC, abstractmethod
 
 class Store(ABC):
@@ -65,29 +77,55 @@ class SqliteStore(Store):
         self._conn.commit()
         return True
 
-s=SqliteStore()
-print("=== 下单流程 ===")
-print("下单前42码库存:", s.check_stock("airmax","42"))   # 5
-o=s.create_order("airmax","42",1,"u1")
-print("下单结果:", o)
-print("下单后42码库存:", s.check_stock("airmax","42"))   # 4（扣了）
-print("查订单1:", s.get_order(o["id"]))
-print()
-print("=== 库存不足 ===")
-try:
-    s.create_order("airmax","43",1,"u1")   # 43码库存0
-except ValueError as e:
-    print("下单43码:", e)
-print()
-print("=== 取消订单 ===")
-print("取消订单1:", s.cancel_order(1))      # True
-print("取消后42码库存:", s.check_stock("airmax","42"))  # 5（退回）
-print("取消后订单1状态:", s.get_order(1)["status"])     # cancelled
-print("再取消订单1:", s.cancel_order(1))    # False（已取消）
-print("取消不存在订单:", s.cancel_order(99)) # False
-print()
-print("=== 持久化验证（重连）===")
-s2=SqliteStore()
-print("重连后订单1还在:", s2.get_order(1) is not None)   # True
-print("重连后42码库存:", s2.check_stock("airmax","42"))  # 5
+# ───────── 下单流程：扣库存 + 建 created 订单 ─────────
+
+def test_order_flow_deducts_and_creates():
+    s = SqliteStore(":memory:")
+    assert s.check_stock("airmax", "42") == 5      # 下单前 5
+    o = s.create_order("airmax", "42", 1, "u1")
+    assert o["status"] == "created"
+    assert s.check_stock("airmax", "42") == 4      # 扣了 1
+    assert s.get_order(o["id"]) is not None
+
+
+# ───────── 库存不足：下单被拒 ─────────
+
+def test_insufficient_stock_rejected():
+    s = SqliteStore(":memory:")
+    try:
+        s.create_order("airmax", "43", 1, "u1")    # 43码库存 0
+        assert False, "库存 0 应抛 ValueError"
+    except ValueError:
+        pass
+
+
+# ───────── 取消订单：退回库存 + 置 cancelled + 幂等 ─────────
+
+def test_cancel_restores_stock_and_is_idempotent():
+    s = SqliteStore(":memory:")
+    o = s.create_order("airmax", "42", 1, "u1")
+    assert s.cancel_order(o["id"]) is True
+    assert s.check_stock("airmax", "42") == 5      # 退回
+    assert s.get_order(o["id"])["status"] == "cancelled"
+    assert s.cancel_order(o["id"]) is False        # 已取消，不重复退
+    assert s.cancel_order(99) is False             # 不存在
+
+
+# ───────── 持久化：重连同一文件，订单与扣减都还在 ─────────
+
+def test_persists_across_reconnect():
+    db = os.path.join(tempfile.mkdtemp(), "shop.db")
+    s = SqliteStore(db)
+    o = s.create_order("airmax", "42", 1, "u1")
+    s2 = SqliteStore(db)                            # 重连同一文件
+    assert s2.get_order(o["id"]) is not None        # 订单持久化
+    assert s2.check_stock("airmax", "42") == 4      # 扣减也持久化
+
+
+if __name__ == "__main__":
+    test_order_flow_deducts_and_creates()
+    test_insufficient_stock_rejected()
+    test_cancel_restores_stock_and_is_idempotent()
+    test_persists_across_reconnect()
+    print("全部通过。")
 

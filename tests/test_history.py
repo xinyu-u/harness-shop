@@ -89,7 +89,7 @@ class _FakeEngine:
         self._reply = reply
         self._tool_name = tool_name
 
-    async def submit_message(self, message: str):
+    async def submit_message(self, message: str, request_token: str | None = None):
         if self._tool_name:
             yield ToolExecutionStarted(self._tool_name, {})
             yield ToolExecutionCompleted(self._tool_name, "工具内部输出", False)

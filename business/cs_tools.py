@@ -16,7 +16,7 @@ B类写操作（is_write=True，阶段5 需确认）：
 """
 
 from pydantic import BaseModel, Field
-from core.tools import BaseTool, ToolResult
+from core.tools import BaseTool, ToolResult, request_token_var
 from business.store import Store
 from core.memory import append_memory
 
@@ -167,9 +167,12 @@ class PlaceOrderTool(BaseTool):
     async def execute(self, arguments: PlaceOrderInput) -> ToolResult:
         # agent 只负责"发起"：建草稿 + 预占库存，不执行不可逆的真扣款。
         # 真正生效（扣库存）由独立的后端确认接口完成——模型/工具碰不到那一步。
+        # 令牌走工程侧暗线（ContextVar），模型入参里没有它：同一轮重复下单收敛成一张草稿。
+        token = request_token_var.get()
         try:
             draft = self._store.create_draft_order(
-                arguments.product_id, arguments.size, arguments.qty, user_id=self._user_id
+                arguments.product_id, arguments.size, arguments.qty,
+                user_id=self._user_id, request_token=token,
             )
         except ValueError as e:
             # 库存不足（本层业务情况）

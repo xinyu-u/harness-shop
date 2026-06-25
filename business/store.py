@@ -56,7 +56,7 @@ class Store(ABC):
     @abstractmethod
     def create_draft_order(
         self, product_id: str, size: str, qty: int, user_id: str,
-        ttl_seconds: int = 900,
+        ttl_seconds: int = 900, request_token: str | None = None,
     ) -> dict: ...
 
     @abstractmethod
@@ -191,7 +191,14 @@ class MemoryStore(Store):
         return True
 
     # ---- 草稿订单 / 预占库存（步骤1）----
-    def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900):
+    def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900,
+                           request_token=None):
+        self.release_expired_orders()   # 先清过期，别让过期单挡住合法新单
+        # 令牌幂等：同令牌已建过草稿 → 复用，不再锁第二份
+        if request_token is not None:
+            for o in self._orders:
+                if o.get("request_token") == request_token:
+                    return o
         key = (product_id, size)
         available = self._inventory.get(key, 0) - self._locked.get(key, 0)
         if available < qty:
@@ -203,6 +210,7 @@ class MemoryStore(Store):
             "user_id": user_id, "status": "pending",
             "expires_at": time.time() + ttl_seconds,
             "request_id": None,
+            "request_token": request_token,
         }
         self._orders.append(order)
         return order
@@ -372,6 +380,15 @@ class SqliteStore(Store):
         # SQLite 的 UNIQUE 视 NULL 互不相等，所以历史 NULL 行不会冲突
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_request_id ON orders(request_id)"
+        )
+        # 创建侧令牌幂等：同一轮对话的令牌只能对应一条订单（与 request_id 正交，服务路径B）
+        try:
+            self._conn.execute("ALTER TABLE orders ADD COLUMN request_token TEXT")
+        except sqlite3.OperationalError:
+            pass   # 列已存在
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_request_token "
+            "ON orders(request_token)"
         )
         # 5) 用户表（账号 + 角色）
         # user_id 在写入前已被 lower()，所以这里不再区分大小写
@@ -577,8 +594,25 @@ class SqliteStore(Store):
             return True
 
     # ---- 草稿订单 / 预占库存（步骤1）----
-    def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900):
+    def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900,
+                           request_token=None):
         with self._lock:
+            self.release_expired_orders()   # 先清过期，别让过期单挡住合法新单
+
+            # —— 令牌幂等：同令牌已建过草稿 → 复用，不再锁第二份 ——
+            if request_token is not None:
+                row = self._conn.execute(
+                    "SELECT id, product_id, size, qty, user_id, status, expires_at "
+                    "FROM orders WHERE request_token = ?",
+                    (request_token,),
+                ).fetchone()
+                if row is not None:
+                    return {
+                        "id": row[0], "product_id": row[1], "size": row[2],
+                        "qty": row[3], "user_id": row[4], "status": row[5],
+                        "expires_at": row[6],
+                    }
+
             try:
                 # ① 原子预占：available(qty-locked) 够才 locked+qty，防超卖
                 cur = self._conn.execute(
@@ -589,12 +623,13 @@ class SqliteStore(Store):
                 if cur.rowcount == 0:
                     raise ValueError(f"库存不足: {product_id} {size}")
 
-                # ② 建 pending 草稿，记过期时间
+                # ② 建 pending 草稿，记过期时间（多带 request_token 列）
                 expires_at = time.time() + ttl_seconds
                 cur2 = self._conn.execute(
-                    "INSERT INTO orders (product_id, size, qty, user_id, status, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (product_id, size, qty, user_id, "pending", expires_at),
+                    "INSERT INTO orders "
+                    "(product_id, size, qty, user_id, status, expires_at, request_token) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (product_id, size, qty, user_id, "pending", expires_at, request_token),
                 )
                 new_id = cur2.lastrowid
                 self._conn.commit()
@@ -604,6 +639,17 @@ class SqliteStore(Store):
                     "user_id": user_id, "status": "pending",
                     "expires_at": expires_at,
                 }
+            except sqlite3.IntegrityError:
+                # 并发兜底：两次同令牌几乎同时到（当前 RLock 已串行化，撞不上；
+                # 为将来连接池保留）。撤销自己刚锁的预占，回查赢家草稿返回。
+                self._conn.rollback()
+                if request_token is not None:
+                    row = self._conn.execute(
+                        "SELECT id FROM orders WHERE request_token = ?", (request_token,)
+                    ).fetchone()
+                    if row is not None:
+                        return self.get_order(row[0])
+                raise
             except ValueError:
                 self._conn.rollback()
                 raise

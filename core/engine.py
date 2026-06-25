@@ -5,7 +5,7 @@ from typing import Callable
 
 from core.messages import ConversationMessage, TextBlock, ToolResultBlock
 from core.events import AssistantTurnComplete, ToolExecutionStarted, ToolExecutionCompleted
-from core.tools import BaseTool
+from core.tools import BaseTool, request_token_var
 from core.client import ModelClient
 from core.compact import should_compact, microcompact
 from core.memory import load_memory, append_memory
@@ -120,7 +120,11 @@ class QueryEngine:
         self._user_id = user_id
         self._role = role
 
-    async def submit_message(self, prompt: str):
+    async def submit_message(self, prompt: str, request_token: str | None = None):
+        # 本轮令牌写入 per-task 上下文，供 place_order 工具 .get()。
+        # submit_message 是 async generator，在调用方同一个 Task 内被迭代，
+        # 故此处 set 对后续 run_query → tool.execute 可见；并发的另一轮在自己的 Task 上下文里，互不影响。
+        request_token_var.set(request_token)
         # 阶段6：读记忆，拼进 system_prompt（每次 submit 更新）
         memory = load_memory(self._user_id)
         role_hint = "（你正在和商家对话，可以使用商家专属工具改价/上架）" if self._role == "merchant" else ""

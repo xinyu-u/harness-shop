@@ -14,6 +14,7 @@
 import json
 import os
 import re
+import uuid
 from pathlib import Path
 
 import jwt
@@ -226,8 +227,9 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
     """非流式入口:用于 curl 调试或外部脚本。前端走 /chat/stream。"""
     user_id, role = _auth(authorization)
     engine = get_engine(user_id, role)
+    request_token = uuid.uuid4().hex   # 每轮一个令牌：同一轮重复下单收敛成一张草稿
     reply_text = ""
-    async for event in engine.submit_message(req.message):
+    async for event in engine.submit_message(req.message, request_token=request_token):
         if isinstance(event, AssistantTurnComplete):
             reply_text = _assistant_text(event)
     return ChatResponse(reply=reply_text)
@@ -238,13 +240,14 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(defau
     user_id, role = _auth(authorization)
     store.save_message(user_id, "user", req.message)   # ① 落库用户消息（工具过程不存）
     engine = get_engine(user_id, role)
+    request_token = uuid.uuid4().hex   # 每轮一个令牌：同一轮重复下单收敛成一张草稿
 
     async def generate():
         yield _event_line("status", text="正在理解你的需求…", busy=True)
         # 这一轮里若成功建了草稿，记下 draft_id，最后随 final 事件透出给前端
         draft_id: int | None = None
         try:
-            async for event in engine.submit_message(req.message):
+            async for event in engine.submit_message(req.message, request_token=request_token):
                 if isinstance(event, ToolExecutionStarted):
                     yield _event_line(
                         "status",

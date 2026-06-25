@@ -5,9 +5,17 @@ is_write 标记区分 A类只读 / B类写操作（阶段5 权限机制据此判
 """
 
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 from pydantic import BaseModel
+
+
+# 「当前这一轮对话的令牌」。由 engine.submit_message 在每轮开头 .set()，
+# 由 place_order 工具在 execute 时 .get()。ContextVar 是 per-task 的：
+# 每个 HTTP 请求是独立 asyncio Task，Task 创建时复制上下文，.set() 互不串扰。
+# 未设置时取默认 None → 工具拿到 None → 不去重（CLI / eval 等不传令牌的入口自然降级）。
+request_token_var: ContextVar[str | None] = ContextVar("request_token", default=None)
 
 
 @dataclass(frozen=True)
