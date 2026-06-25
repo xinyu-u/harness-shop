@@ -65,7 +65,7 @@ def test_tool_call_intent():
 
 
 def main():
-    print(f"timeout={_api_timeout()}s base_url={os.getenv('OPENAI_BASE_URL')}")
+    print(f"timeout={_api_timeout()}s base_url={os.getenv('base_url')}")
     test_plain_reply()
     test_tool_call_intent()
 

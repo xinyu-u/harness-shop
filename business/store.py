@@ -86,6 +86,11 @@ class Store(ABC):
     @abstractmethod
     def get_user(self, user_id: str) -> dict | None: ...
 
+    @abstractmethod
+    def update_user(self, user_id: str, password_hash: str, role: str) -> bool:
+        """覆盖已存在用户的密码与角色；用户不存在返回 False（不新建）。"""
+        ...
+
     # ---- 商家工具 ----
     @abstractmethod
     def set_price(self, product_id: str, price: int) -> bool: ...
@@ -287,6 +292,13 @@ class MemoryStore(Store):
         if u is None:
             return None
         return {"user_id": user_id.lower(), **u}
+
+    def update_user(self, user_id, password_hash, role):
+        uid = user_id.lower()
+        if uid not in self._users:
+            return False
+        self._users[uid] = {"password_hash": password_hash, "role": role}
+        return True
 
     # ---- 商家工具 ----
     def set_price(self, product_id, price):
@@ -790,6 +802,15 @@ class SqliteStore(Store):
             if row is None:
                 return None
             return {"user_id": row[0], "password_hash": row[1], "role": row[2]}
+
+    def update_user(self, user_id, password_hash, role):
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE users SET password_hash = ?, role = ? WHERE user_id = ?",
+                (password_hash, role, user_id.lower()),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     # ---- 商家工具 ----
     def set_price(self, product_id, price):

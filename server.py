@@ -13,7 +13,6 @@
 
 import json
 import os
-import re
 import uuid
 from pathlib import Path
 
@@ -66,11 +65,7 @@ def _seed_merchant_from_env() -> None:
         print(f"[seed] 新建商家账号 user_id={uid}")
     else:
         # 已存在 → 按 env 覆盖密码 + 强制 role=merchant（跟 seed_merchant.py --force 同语义）
-        store._conn.execute(
-            "UPDATE users SET password_hash = ?, role = 'merchant' WHERE user_id = ?",
-            (pw_hash, uid),
-        )
-        store._conn.commit()
+        store.update_user(uid, pw_hash, role="merchant")
         print(f"[seed] 刷新商家账号 user_id={uid}")
 
 
@@ -146,16 +141,6 @@ def _assistant_text(event: AssistantTurnComplete) -> str:
     return "".join(
         b.text for b in event.message.content if isinstance(b, TextBlock)
     )
-
-
-# place_order 工具的输出格式固定（"已生成待确认订单 #7：…"），#后是 draft_id。
-# 从这条确定性输出抠 id，比解析 LLM 自由回复可靠（回复会被模型改写）。
-_DRAFT_ID_RE = re.compile(r"#(\d+)")
-
-
-def _extract_draft_id(place_order_output: str) -> int | None:
-    m = _DRAFT_ID_RE.search(place_order_output)
-    return int(m.group(1)) if m else None
 
 
 def _tool_status(tool_name: str, phase: str, is_error: bool = False) -> str:
@@ -260,7 +245,7 @@ async def chat_stream(req: ChatRequest, authorization: str | None = Header(defau
                     )
                 elif isinstance(event, ToolExecutionCompleted):
                     if event.tool_name == "place_order" and not event.is_error:
-                        got = _extract_draft_id(event.output)
+                        got = event.metadata.get("draft_id")
                         if got is not None:
                             draft_id = got   # 多次下单取最后一张草稿
                     yield _event_line(

@@ -51,6 +51,16 @@ s.create_user("boss", hash_password("boss123"), role="merchant")
 assert s.get_user("boss")["role"] == "merchant"
 print("[6] merchant seed OK")
 
+# 7) update_user：覆盖密码 + 角色（server 启动种商家走这条，不再伸手进 _conn）
+assert s.update_user("alice", hash_password("newpw"), role="merchant")
+u = s.get_user("alice")
+assert u["role"] == "merchant" and verify_password("newpw", u["password_hash"])
+assert s.update_user("ALICE", hash_password("p2"), role="user")   # 大小写归一
+assert s.get_user("alice")["role"] == "user"
+assert not s.update_user("nobody", hash_password("x"), role="user")   # 不存在 → False，不新建
+assert s.get_user("nobody") is None
+print("[7] update_user OK")
+
 s._conn.close()
 os.remove(DB)
 print("\n全部通过。")

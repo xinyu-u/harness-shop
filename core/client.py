@@ -8,9 +8,10 @@ from dotenv import load_dotenv
 
 from core.messages import ConversationMessage, TextBlock, ToolUseBlock
 
+# 把 .env 读进进程环境（api_key / base_url / model / api_timeout）。
+# 只读不改：不再往 os.environ 写 OPENAI_* 派生键，避免 import 时污染全局环境
+# （那会让测试/嵌入难做）。具体取值在 OpenAIClient 构造时直接读 .env 的小写键。
 load_dotenv()
-os.environ["OPENAI_API_KEY"] = os.getenv("api_key", "")
-os.environ["OPENAI_BASE_URL"] = os.getenv("base_url", "")
 
 DEFAULT_API_TIMEOUT = 60.0
 
@@ -59,8 +60,8 @@ class FakeClient:
 class OpenAIClient:
     def __init__(self, timeout: float | None = None):
         self._client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("api_key"),
+            base_url=os.getenv("base_url"),
             timeout=timeout if timeout is not None else _api_timeout(),
         )
         self._model = os.getenv("model")
