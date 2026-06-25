@@ -194,11 +194,16 @@ class MemoryStore(Store):
     def create_draft_order(self, product_id, size, qty, user_id, ttl_seconds=900,
                            request_token=None):
         self.release_expired_orders()   # 先清过期，别让过期单挡住合法新单
-        # 令牌幂等：同令牌已建过草稿 → 复用，不再锁第二份
+        # 令牌幂等：同令牌的草稿还活着(pending) → 复用，不再锁第二份。
+        # 已作废(过期/取消) → 别复活那张死单（用户拿它去 confirm 会卡死），
+        # 释放令牌占用、落到下面建一张新的 pending（与 SqliteStore 行为一致）。
         if request_token is not None:
             for o in self._orders:
                 if o.get("request_token") == request_token:
-                    return o
+                    if o["status"] == "pending":
+                        return o
+                    o["request_token"] = None
+                    break
         key = (product_id, size)
         available = self._inventory.get(key, 0) - self._locked.get(key, 0)
         if available < qty:
@@ -599,7 +604,7 @@ class SqliteStore(Store):
         with self._lock:
             self.release_expired_orders()   # 先清过期，别让过期单挡住合法新单
 
-            # —— 令牌幂等：同令牌已建过草稿 → 复用，不再锁第二份 ——
+            # —— 令牌幂等：同令牌的草稿还活着(pending) → 复用，不再锁第二份 ——
             if request_token is not None:
                 row = self._conn.execute(
                     "SELECT id, product_id, size, qty, user_id, status, expires_at "
@@ -607,11 +612,17 @@ class SqliteStore(Store):
                     (request_token,),
                 ).fetchone()
                 if row is not None:
-                    return {
-                        "id": row[0], "product_id": row[1], "size": row[2],
-                        "qty": row[3], "user_id": row[4], "status": row[5],
-                        "expires_at": row[6],
-                    }
+                    if row[5] == "pending":
+                        return {
+                            "id": row[0], "product_id": row[1], "size": row[2],
+                            "qty": row[3], "user_id": row[4], "status": row[5],
+                            "expires_at": row[6],
+                        }
+                    # 已作废(过期/取消)：别复活死单。先把令牌从死单上摘掉，
+                    # 否则下面 INSERT 同令牌会撞 request_token 唯一索引、被兜底又查回这张死单。
+                    self._conn.execute(
+                        "UPDATE orders SET request_token = NULL WHERE id = ?", (row[0],)
+                    )
 
             try:
                 # ① 原子预占：available(qty-locked) 够才 locked+qty，防超卖
@@ -640,8 +651,9 @@ class SqliteStore(Store):
                     "expires_at": expires_at,
                 }
             except sqlite3.IntegrityError:
-                # 并发兜底：两次同令牌几乎同时到（当前 RLock 已串行化，撞不上；
-                # 为将来连接池保留）。撤销自己刚锁的预占，回查赢家草稿返回。
+                # 并发兜底：两个同令牌的连接都过了上面的预检、都跑到 INSERT，唯一索引拦下第二个。
+                # 【当前单连接 + RLock 下不可达，零覆盖是有意的】：顺序到达的重复已被预检拦住，
+                # 只有"多连接并发"才进得来——为将来切连接池预留。撤销自己刚锁的预占，回查赢家返回。
                 self._conn.rollback()
                 if request_token is not None:
                     row = self._conn.execute(

@@ -83,7 +83,46 @@ def test_double_fire_in_one_turn_dedupes():
     assert store.check_stock("airmax", "42") == 4, "应只锁 1 份"
 
 
-# ───────── 3. 并发隔离：不同令牌互不串台 ─────────
+# ───────── 3. 状态交叉：令牌对应的草稿已作废 → 不复活，建新的 ─────────
+
+def test_expired_draft_same_token_does_not_resurrect_memory():
+    store = MemoryStore()
+    # ttl=-1：expires_at 落在过去，保证 release 一定判过期（避开 +0 卡等号）
+    d1 = store.create_draft_order("airmax", "42", 1, "alice",
+                                  request_token="tok-1", ttl_seconds=-1)
+    store.release_expired_orders()                 # #1 → cancelled，释放 locked
+    d2 = store.create_draft_order("airmax", "42", 1, "alice", request_token="tok-1")
+    # 不复用那张 cancelled 的，而是建一张新的 pending（否则用户拿死单去 confirm 卡死）
+    assert d2["status"] == "pending"
+    assert d2["id"] != d1["id"]
+    assert store.check_stock("airmax", "42") == 4   # 新草稿正常锁 1 份
+
+
+def test_expired_draft_same_token_does_not_resurrect_sqlite():
+    # SqliteStore 还要过 request_token 唯一索引这一关：作废后须先释放令牌占用才能重建
+    store = SqliteStore(":memory:")
+    d1 = store.create_draft_order("airmax", "42", 1, "alice",
+                                  request_token="tok-1", ttl_seconds=-1)
+    store.release_expired_orders()
+    d2 = store.create_draft_order("airmax", "42", 1, "alice", request_token="tok-1")
+    assert d2["status"] == "pending"
+    assert d2["id"] != d1["id"]
+    assert store.check_stock("airmax", "42") == 4
+
+
+# ───────── 4. 库存守恒：走完整生命周期，账要平 ─────────
+
+def test_inventory_conserved_through_lifecycle():
+    store = MemoryStore()                          # airmax 42 = 5
+    d = store.create_draft_order("airmax", "42", 2, "alice", request_token="t1")
+    assert store.check_stock("airmax", "42") == 3      # 锁 2，available 3
+    store.confirm_draft_order(d["id"], "alice")        # 预占转真扣
+    assert store.check_stock("airmax", "42") == 3      # qty 5→3，locked 2→0，available 仍 3
+    store.cancel_order(d["id"])                         # 取消已 confirmed → 退 qty
+    assert store.check_stock("airmax", "42") == 5       # 回到 5，账平
+
+
+# ───────── 5. 并发隔离：不同令牌互不串台 ─────────
 
 def test_token_var_isolated_across_concurrent_turns():
     async def _run():
