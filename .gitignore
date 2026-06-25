@@ -14,6 +14,7 @@ Thumbs.db
 
 # Runtime data / test artifacts
 shop.db
+shop.db.bak-*
 test_*.db
 memory_*.md
 memory_test_*.md

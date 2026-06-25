@@ -2,7 +2,8 @@
 
 补货语义：qty += add_qty（增量加，绝不是覆写绝对值）。
   - 已有尺码 → 在原库存上加
-  - 没有的尺码 → 自动新建该 (product_id, size) 库存行
+  - 没有的尺码 → 默认拒绝（抛 UnknownSizeError，防幻觉尺码被静默写入），
+                 仅 create_size=True 显式确认时才新建该 (product_id, size) 库存行
   - 商品不存在 → 拒绝（store 返回 None / 工具 is_error）
   - 只动 qty 不动 locked（available = qty - locked 仍自洽）
   - 仅商家可调（allowed_roles={"merchant"}）
@@ -11,7 +12,8 @@
 """
 
 import asyncio
-from business.store import SqliteStore, MemoryStore
+import pytest
+from business.store import SqliteStore, MemoryStore, UnknownSizeError
 from business.cs_tools import RestockProductTool, build_tools
 
 
@@ -26,13 +28,21 @@ def test_restock_existing_size_increments():
     print("✅ 已有尺码增量补货：5→25")
 
 
-def test_restock_creates_missing_size_row():
+def test_restock_missing_size_rejected_by_default():
     store = SqliteStore(":memory:")
     assert store.check_stock("airmax", "44") == 0, "44码本来没有库存行"
-    new_qty = store.restock("airmax", "44", 3)
+    with pytest.raises(UnknownSizeError):
+        store.restock("airmax", "44", 3)        # 默认不静默建幻觉尺码
+    assert store.check_stock("airmax", "44") == 0, "拒绝后不应写入"
+    print("✅ 缺失尺码补货：默认拒绝（防幻觉尺码）")
+
+
+def test_restock_missing_size_created_with_flag():
+    store = SqliteStore(":memory:")
+    new_qty = store.restock("airmax", "44", 3, create_size=True)   # 显式确认才建
     assert new_qty == 3
-    assert store.check_stock("airmax", "44") == 3, "缺失尺码：自动新建库存行"
-    print("✅ 缺失尺码补货：自动新建库存行 →3")
+    assert store.check_stock("airmax", "44") == 3, "显式确认：新建库存行"
+    print("✅ 缺失尺码补货：显式确认后新建库存行 →3")
 
 
 def test_restock_zero_stock_size():
@@ -62,7 +72,9 @@ def test_restock_preserves_locked():
 def test_restock_memorystore_parity():
     store = MemoryStore()
     assert store.restock("airmax", "42", 20) == 25
-    assert store.restock("airmax", "44", 3) == 3        # 新建尺码
+    with pytest.raises(UnknownSizeError):
+        store.restock("airmax", "44", 3)                # 默认拒绝未知尺码
+    assert store.restock("airmax", "44", 3, create_size=True) == 3   # 确认后新建
     assert store.restock("nope", "42", 5) is None       # 不存在商品
     print("✅ MemoryStore 补货：与 SqliteStore 行为一致")
 
@@ -105,7 +117,8 @@ def test_restock_tool_unknown_product_errors():
 
 def main():
     test_restock_existing_size_increments()
-    test_restock_creates_missing_size_row()
+    test_restock_missing_size_rejected_by_default()
+    test_restock_missing_size_created_with_flag()
     test_restock_zero_stock_size()
     test_restock_unknown_product_rejected()
     test_restock_preserves_locked()

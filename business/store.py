@@ -10,6 +10,15 @@ import time
 from abc import ABC, abstractmethod
 
 
+class UnknownSizeError(ValueError):
+    """补货时尺码在该商品下不存在，且未显式允许新建。
+
+    专门用来把"补到一个不存在的尺码"和别的 ValueError（如库存不足）区分开，
+    让工具层能给出"现有尺码是 X/Y/Z，确认要新增吗"这种有用的提示，
+    而不是静默给幻觉尺码建库存行（jeans 28-32 脏数据就是这么来的）。
+    """
+
+
 class Store(ABC):
     """数据访问接口。"""
 
@@ -21,6 +30,9 @@ class Store(ABC):
 
     @abstractmethod
     def check_stock(self, product_id: str, size: str) -> int: ...
+
+    @abstractmethod
+    def list_inventory(self, product_id: str) -> list[dict] | None: ...
 
     @abstractmethod
     def recommend_size(self, height: int, weight: int, category: str) -> str | None: ...
@@ -82,7 +94,9 @@ class Store(ABC):
     def add_product(self, product_id: str, name: str, price: int, category: str) -> bool: ...
 
     @abstractmethod
-    def restock(self, product_id: str, size: str, add_qty: int) -> int | None: ...
+    def restock(
+        self, product_id: str, size: str, add_qty: int, create_size: bool = False,
+    ) -> int | None: ...
 
     # ---- 聊天档案（上拉加载式历史）----
     @abstractmethod
@@ -141,6 +155,18 @@ class MemoryStore(Store):
         # available = 总库存 - 已预占
         key = (product_id, size)
         return self._inventory.get(key, 0) - self._locked.get(key, 0)
+
+    def list_inventory(self, product_id):
+        # 枚举某商品的所有真实尺码 + 可用量。商品不存在 → None（区别于"有商品但无任何尺码"→ []）。
+        if product_id not in self._products:
+            return None
+        self.release_expired_orders()   # 先释放过期预占，available 才准
+        rows = [
+            {"size": size, "qty": qty, "available": qty - self._locked.get((pid, size), 0)}
+            for (pid, size), qty in self._inventory.items()
+            if pid == product_id
+        ]
+        return sorted(rows, key=lambda r: r["size"])
 
     def recommend_size(self, height, weight, category):
         # 在区间表里找：品类匹配 + 身高体重都落在区间内 → 返回该尺码
@@ -277,12 +303,15 @@ class MemoryStore(Store):
         }
         return True
 
-    def restock(self, product_id, size, add_qty):
+    def restock(self, product_id, size, add_qty, create_size=False):
         # 增量补货：qty += add_qty（不覆写绝对值）。商品不存在 → None。
-        # 该尺码还没有库存行 → 从 0 起新建。只动 qty，不碰 locked。
+        # 该尺码没有库存行：默认拒绝（抛 UnknownSizeError，防幻觉尺码被静默写入），
+        # 仅 create_size=True 时才从 0 起新建。只动 qty，不碰 locked。
         if product_id not in self._products:
             return None
         key = (product_id, size)
+        if key not in self._inventory and not create_size:
+            raise UnknownSizeError(f"{product_id} 没有 {size} 这个尺码")
         self._inventory[key] = self._inventory.get(key, 0) + add_qty
         return self._inventory[key]
 
@@ -461,6 +490,23 @@ class SqliteStore(Store):
             ).fetchone()
             # available = qty - locked；fetchone 返回 (qty, locked) 或 None
             return (row[0] - row[1]) if row else 0
+
+    def list_inventory(self, product_id):
+        with self._lock:
+            # 商品不存在 → None（区别于"商品在但还没任何尺码"→ []）
+            if self._conn.execute(
+                "SELECT 1 FROM products WHERE id = ?", (product_id,)
+            ).fetchone() is None:
+                return None
+            self.release_expired_orders()   # 先释放过期预占，available 才准
+            rows = self._conn.execute(
+                "SELECT size, qty, locked FROM inventory WHERE product_id = ? ORDER BY size",
+                (product_id,),
+            ).fetchall()
+            return [
+                {"size": r[0], "qty": r[1], "available": r[1] - r[2]}
+                for r in rows
+            ]
 
     def get_product(self, product_id):
         with self._lock:
@@ -767,10 +813,11 @@ class SqliteStore(Store):
             except sqlite3.IntegrityError:
                 return False   # 主键冲突 → 商品已存在
 
-    def restock(self, product_id, size, add_qty):
+    def restock(self, product_id, size, add_qty, create_size=False):
         with self._lock:
             # 增量补货：qty += add_qty（原子自增，不覆写绝对值）。商品不存在 → None。
-            # 该 (product_id, size) 还没有库存行 → 新建（从 0 起补）。只动 qty，不碰 locked。
+            # 该 (product_id, size) 没有库存行：默认拒绝（抛 UnknownSizeError，防幻觉尺码被静默写入），
+            # 仅 create_size=True 时才新建（从 0 起补）。只动 qty，不碰 locked。
             if self._conn.execute(
                 "SELECT 1 FROM products WHERE id = ?", (product_id,)
             ).fetchone() is None:
@@ -781,12 +828,18 @@ class SqliteStore(Store):
                     (add_qty, product_id, size),
                 )
                 if cur.rowcount == 0:
-                    # 没有该尺码的库存行：新建（locked 走默认 0）
+                    # 没有该尺码的库存行
+                    if not create_size:
+                        self._conn.rollback()
+                        raise UnknownSizeError(f"{product_id} 没有 {size} 这个尺码")
+                    # 显式确认新增：新建（locked 走默认 0）
                     self._conn.execute(
                         "INSERT INTO inventory (product_id, size, qty) VALUES (?, ?, ?)",
                         (product_id, size, add_qty),
                     )
                 self._conn.commit()
+            except UnknownSizeError:
+                raise
             except Exception:
                 self._conn.rollback()
                 raise

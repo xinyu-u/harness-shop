@@ -130,12 +130,14 @@ class CancelResponse(BaseModel):
 TOOL_PROGRESS_TEXT: dict[str, tuple[str, str]] = {
     "search_products": ("正在找商品…", "找到了相关商品"),
     "check_stock": ("正在查库存…", "查到了库存"),
+    "list_stock": ("正在查全部尺码库存…", "查到了各尺码库存"),
     "recommend_size": ("正在推荐尺码…", "尺码建议已生成"),
     "get_order_status": ("正在查订单…", "订单状态查到了"),
     "place_order": ("正在提交订单…", "订单处理完成"),
     "cancel_order": ("正在取消订单…", "取消结果已确认"),
     "update_price": ("正在改价…", "价格已更新"),
     "add_product": ("正在上架商品…", "上架结果已确认"),
+    "restock_product": ("正在补货…", "补货结果已确认"),
     "write_memory": ("正在记录偏好…", "已记住偏好"),
 }
 
