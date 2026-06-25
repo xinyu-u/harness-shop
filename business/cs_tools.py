@@ -17,7 +17,7 @@ B类写操作（is_write=True，阶段5 需确认）：
 
 from pydantic import BaseModel, Field
 from core.tools import BaseTool, ToolResult, request_token_var
-from business.store import Store
+from business.store import Store, UnknownSizeError
 from core.memory import append_memory
 
 
@@ -63,6 +63,7 @@ class CheckStockTool(BaseTool):
     description = (
         "查询【某个具体商品某个尺码的库存数量】。"
         "警告：调用此工具前，必须明确知道用户的具体尺码。如果用户未提供尺码，绝不能自己猜测或默认使用常见尺码，必须先向用户追问。"
+        "不确定某商品到底有哪些尺码时，请先用 list_stock 查全部尺码，不要凭常识猜尺码。"
     )
     input_model = CheckStockInput
     is_write = False
@@ -72,12 +73,62 @@ class CheckStockTool(BaseTool):
 
     async def execute(self, arguments: CheckStockInput) -> ToolResult:
         try:
-            qty = self._store.check_stock(arguments.product_id, arguments.size)
+            rows = self._store.list_inventory(arguments.product_id)
         except Exception as e:
             return ToolResult(output=f"查询库存失败：{e}", is_error=True)
-        if qty <= 0:
+        if rows is None:
+            return ToolResult(output=f"商品 {arguments.product_id} 不存在", is_error=True)
+        # 区分"该商品根本没有这个尺码"和"有这个尺码但缺货"——
+        # 否则猜出来的幻觉尺码会被当成真实的"无货"尺码（boss 测试里的 bug）。
+        match = next((r for r in rows if r["size"] == arguments.size), None)
+        if match is None:
+            sizes = "、".join(r["size"] for r in rows) or "（暂无任何尺码）"
+            return ToolResult(
+                output=(
+                    f"{arguments.product_id} 没有 {arguments.size} 这个尺码。"
+                    f"现有尺码：{sizes}"
+                )
+            )
+        if match["available"] <= 0:
             return ToolResult(output=f"{arguments.product_id} {arguments.size}码 当前无货")
-        return ToolResult(output=f"{arguments.product_id} {arguments.size}码 有货，库存 {qty} 件")
+        return ToolResult(
+            output=f"{arguments.product_id} {arguments.size}码 有货，库存 {match['available']} 件"
+        )
+
+
+# ============ A类：list_stock ============
+
+class ListStockInput(BaseModel):
+    product_id: str = Field(description="商品ID，如 airmax")
+
+
+class ListStockTool(BaseTool):
+    name = "list_stock"
+    description = (
+        "列出【某个商品的全部真实尺码及各自库存】。"
+        "用户问'有哪些尺码''尺码和库存''各尺码还剩多少'这类问题时用它，"
+        "一次拿到该商品所有尺码——绝不要自己凭常识罗列 S/M/L/XL 或 28-32 等尺码。"
+    )
+    input_model = ListStockInput
+    is_write = False
+
+    def __init__(self, store: Store):
+        self._store = store
+
+    async def execute(self, arguments: ListStockInput) -> ToolResult:
+        try:
+            rows = self._store.list_inventory(arguments.product_id)
+        except Exception as e:
+            return ToolResult(output=f"查询库存失败：{e}", is_error=True)
+        if rows is None:
+            return ToolResult(output=f"商品 {arguments.product_id} 不存在", is_error=True)
+        if not rows:
+            return ToolResult(output=f"商品 {arguments.product_id} 暂无任何尺码库存")
+        lines = [
+            f"{r['size']}码：{r['available']} 件" + ("（无货）" if r["available"] <= 0 else "")
+            for r in rows
+        ]
+        return ToolResult(output=f"{arguments.product_id} 各尺码库存：\n" + "\n".join(lines))
 
 
 # ============ A类：recommend_size ============
@@ -298,6 +349,14 @@ class RestockProductInput(BaseModel):
     product_id: str = Field(description="要补货的商品ID")
     size: str = Field(description="尺码，如 42 / L")
     add_qty: int = Field(description="补货数量（在现有库存上【增加】这么多，不是设为这个值）", gt=0)
+    confirm_new_size: bool = Field(
+        default=False,
+        description=(
+            "是否允许为该商品【新增一个原本不存在的尺码】。默认 False。"
+            "仅当商家已明确确认要新增这个尺码时才设为 True；"
+            "不要为了让补货成功而擅自设 True——尺码不对时应先反问商家。"
+        ),
+    )
 
 
 class RestockProductTool(BaseTool):
@@ -306,6 +365,8 @@ class RestockProductTool(BaseTool):
         "给【已存在商品的某个尺码】补货（仅商家）：在现有库存上增加 add_qty 件。"
         "用于'airmax 42码补20件''L码再进10件'这类补货。"
         "注意：这是增量加，不是把库存改成某个绝对值；新增一个还不存在的商品请用 add_product。"
+        "若补的尺码该商品并不存在，工具会报错并列出真实尺码——此时不要自行新增，"
+        "应先把真实尺码告诉商家并确认，确认后再带 confirm_new_size=true 重试。"
     )
     input_model = RestockProductInput
     is_write = True
@@ -317,7 +378,21 @@ class RestockProductTool(BaseTool):
     async def execute(self, arguments: RestockProductInput) -> ToolResult:
         try:
             new_qty = self._store.restock(
-                arguments.product_id, arguments.size, arguments.add_qty
+                arguments.product_id, arguments.size, arguments.add_qty,
+                create_size=arguments.confirm_new_size,
+            )
+        except UnknownSizeError:
+            # 尺码不在该商品下 + 未确认新增：报错并列出真实尺码，逼模型先和商家核实，
+            # 不再静默给幻觉尺码建库存行。
+            rows = self._store.list_inventory(arguments.product_id) or []
+            sizes = "、".join(r["size"] for r in rows) or "（暂无任何尺码）"
+            return ToolResult(
+                output=(
+                    f"商品 {arguments.product_id} 没有 {arguments.size} 这个尺码，未补货。"
+                    f"现有尺码：{sizes}。"
+                    f"若确实要新增 {arguments.size} 码，请先与商家确认后再带 confirm_new_size=true 重试。"
+                ),
+                is_error=True,
             )
         except Exception as e:
             return ToolResult(output=f"补货失败：{e}", is_error=True)
@@ -365,6 +440,7 @@ def build_tools(store: Store, user_id: str = "default") -> dict[str, BaseTool]:
     tools = [
         SearchProductsTool(store),
         CheckStockTool(store),
+        ListStockTool(store),
         RecommendSizeTool(store),
         GetOrderStatusTool(store, user_id),
         PlaceOrderTool(store, user_id),

@@ -51,6 +51,29 @@ CASES = [
     # 易混淆 search↔stock：明确到尺码 → check_stock
     Case("airmax 42 还剩几双", "check_stock", label="stock-vs-search"),
 
+    # ---- list_stock：问「有哪些尺码 / 各尺码库存 / 尺码和库存」----
+    # boss 人工测试的幻觉入口：以前没有枚举工具，模型只能脑补 S/M/L/XL、28-32。
+    # 现在必须路由到 list_stock 拿真实尺码；且【绝不】退化成 check_stock——
+    # 用 check_stock 必须先指定一个尺码，而泛问"有哪些"时模型手里没有尺码，
+    # 一旦调 check_stock 就意味着它在猜尺码（正是幻觉的源头），故 forbid 之。
+    Case("airmax 有哪些尺码", "list_stock", role="merchant",
+         forbidden_tool="check_stock", label="list-有哪些尺码"),
+    Case("查询 tshirt 的尺码和库存", "list_stock",
+         forbidden_tool="check_stock", label="list-尺码和库存",
+         fake_script=[
+             ConversationMessage(role="assistant", content=[
+                 ToolUseBlock(name="list_stock", input={"product_id": "tshirt"})]),
+             ConversationMessage(role="assistant", content=[
+                 TextBlock(text="tshirt 各尺码库存：L码 20 件")]),
+         ]),
+    Case("airmax 各个尺码分别还剩多少件", "list_stock", role="merchant",
+         forbidden_tool="check_stock", label="list-各尺码剩多少"),
+    Case("tshirt 都有哪些码，库存怎么样", "list_stock",
+         forbidden_tool="check_stock", label="list-口语"),
+    # 易混淆 list_stock↔check_stock：泛问全部尺码 → list_stock；点名单一尺码才 check_stock
+    Case("把 airmax 这款鞋的尺码库存盘一下", "list_stock", role="merchant",
+         forbidden_tool="check_stock", label="list-vs-check"),
+
     # ---- recommend_size ----
     Case("我178cm 70kg 穿鞋多少码", "recommend_size", label="size-基本"),
     Case("身高170 体重55，上衣推荐什么码", "recommend_size", label="size-上衣"),
