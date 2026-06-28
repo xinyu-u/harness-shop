@@ -98,7 +98,10 @@ async def run_query(config: RunConfig, messages: list[ConversationMessage]):
 
             tool_result = await tool.execute(parsed)
             result = ToolResultBlock(tool_use_id=tc.id, content=tool_result.output, is_error=tool_result.is_error)
-            yield ToolExecutionCompleted(tool_name=tc.name, output=result.content, is_error=result.is_error)
+            yield ToolExecutionCompleted(
+                tool_name=tc.name, output=result.content, is_error=result.is_error,
+                metadata=tool_result.metadata,
+            )
             messages.append(ConversationMessage(role="user", content=[result]))
 
     yield AssistantTurnComplete(
@@ -143,6 +146,11 @@ class QueryEngine:
               "\n\n# 交互规范\n"
               "当工具需要必填参数（如尺码、数量）而用户未提供时，千万不要自行猜测或使用默认值，请直接用友好的语气反问用户补充信息。"
               "补货时若 restock_product 报\"没有这个尺码\"，不要自行新增，应把工具列出的真实尺码告诉商家、确认后再补。"
+              "\n\n# 尺码记忆\n"
+              "当用户明确告知/确认自己的尺码时，顺手调一次 write_memory 记住："
+              "鞋码用 key=\"shoe_size\"、上衣码用 key=\"top_size\"，value 写具体尺码。"
+              "若之前已记过同类尺码，必须用同一个 key 再写一次来更新（覆盖旧值），不要新开 key"
+              "——记忆只保留最新尺码。只记尺码这一类，订单/品类/交付不用记。"
             + (f"\n\n# 你记得的用户信息\n{memory}\n" if memory else "")
         )
         self._messages.append(

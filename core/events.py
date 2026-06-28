@@ -4,7 +4,7 @@
 自己决定怎么显示。这让"循环逻辑"和"显示方式"解耦。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from core.messages import ConversationMessage
 
@@ -28,4 +28,6 @@ class ToolExecutionCompleted:
     tool_name: str
     output: str
     is_error: bool = False
+    # 工具结构化透出的附加信息（如 place_order 的 draft_id），原样从 ToolResult 带出。
+    metadata: dict[str, Any] = field(default_factory=dict)
 

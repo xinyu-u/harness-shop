@@ -18,7 +18,7 @@ B类写操作（is_write=True，阶段5 需确认）：
 from pydantic import BaseModel, Field
 from core.tools import BaseTool, ToolResult, request_token_var
 from business.store import Store, UnknownSizeError
-from core.memory import append_memory
+from core.memory import upsert_memory, ALLOWED_MEMORY_KEYS
 
 
 # ============ A类：search_products ============
@@ -235,7 +235,10 @@ class PlaceOrderTool(BaseTool):
                 f"已生成待确认订单 #{draft['id']}："
                 f"{arguments.product_id} {arguments.size}码 ×{arguments.qty}，"
                 f"请在15分钟内确认。订单号：{draft['id']}"
-            )
+            ),
+            # draft_id 结构化透出：循环层据此把 id 带进事件流，
+            # 不依赖解析上面这句人类可读文案（文案一改就会抠错）。
+            metadata={"draft_id": draft["id"]},
         )
 
 
@@ -412,12 +415,17 @@ class RestockProductTool(BaseTool):
 # ============ 记忆工具：模型自己决定记什么 ============
 
 class WriteMemoryInput(BaseModel):
-    content: str = Field(description="要长期记住的用户信息，如'用户穿42码鞋'")
+    key: str = Field(
+        description="记忆类别键。目前只用于尺码：鞋码用 'shoe_size'，上衣码用 'top_size'。"
+                    "同一类别再次确认时用同一个 key，会覆盖更新旧值。")
+    value: str = Field(
+        max_length=64,
+        description="该类别的具体值，如鞋码 '42码'、上衣码 'M'。")
 
 
 class WriteMemoryTool(BaseTool):
     name = "write_memory"
-    description = "记住关于用户的、跨会话有用的信息（尺码偏好、历史订单等）。只记不能从其他工具重新查到的信息。"
+    description = "记住用户的尺码偏好（鞋码/上衣码），跨会话有用。同一类别用同一个 key，已记过就覆盖更新，不要新开 key。"
     input_model = WriteMemoryInput
     is_write = False
 
@@ -425,7 +433,14 @@ class WriteMemoryTool(BaseTool):
         self._user_id = user_id
 
     async def execute(self, arguments: WriteMemoryInput) -> ToolResult:
-        append_memory(arguments.content, self._user_id)
+        # 投毒护栏：只允许尺码两类 key 落盘。非白名单（如 role/discount）一律拒绝——
+        # 否则会跨会话注入 system_prompt 造成持久污染。prompt 拦不住对抗输入，此处硬拦。
+        if arguments.key not in ALLOWED_MEMORY_KEYS:
+            return ToolResult(
+                output=f"只支持记忆尺码类（{ '、'.join(sorted(ALLOWED_MEMORY_KEYS)) }），不记其它信息。",
+                is_error=True,
+            )
+        upsert_memory(arguments.key, arguments.value, self._user_id)
         return ToolResult(output="已记住")
 
 

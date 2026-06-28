@@ -217,19 +217,31 @@ def test_cancel_idempotent_does_not_bypass_ownership():
 
 
 # ════════════════ 步骤5（后端半）：把 draft_id 透出到事件流 ════════════════
-# 前端要拿到 draft_id 才能显示确认按钮。可靠做法：从 place_order 的确定性输出
-# （格式 '#N' 我们自己控制）里抠 id，而不是解析 LLM 的自由回复（会被改写，脆）。
+# 前端要拿到 draft_id 才能显示确认按钮。可靠做法：place_order 把 draft_id 放进
+# ToolResult.metadata 结构化透出，事件流原样带出——不依赖解析人类可读输出串
+# （文案一改就会静默抠错 id）。
 
-def test_extract_draft_id_from_place_order_output():
-    out = "已生成待确认订单 #7：airmax 42码 ×1，请在15分钟内确认。订单号：7"
-    assert server._extract_draft_id(out) == 7, "应从工具输出抠出 draft_id"
-    print("✅ 步骤5 透出：从 place_order 输出抠出 draft_id")
+def test_place_order_surfaces_draft_id_in_metadata():
+    store = SqliteStore(":memory:")
+    tool = PlaceOrderTool(store, user_id="alice")
+
+    result = asyncio.run(tool.execute(PlaceOrderInput(product_id="airmax", size="42", qty=1)))
+
+    assert not result.is_error
+    order = store.get_order(1)
+    assert result.metadata.get("draft_id") == order["id"], "成功下单应在 metadata 结构化透出 draft_id"
+    print("✅ 步骤5 透出：place_order 在 metadata 带出 draft_id")
 
 
-def test_extract_draft_id_none_on_failure():
-    assert server._extract_draft_id("下单失败：库存不足: airmax 43") is None, "失败输出无 draft_id"
-    assert server._extract_draft_id("没有找到包含「xyz」的商品") is None, "无关输出返回 None"
-    print("✅ 步骤5 透出：失败/无关输出 → draft_id 为 None")
+def test_place_order_failure_has_no_draft_id():
+    store = SqliteStore(":memory:")
+    tool = PlaceOrderTool(store, user_id="alice")
+
+    result = asyncio.run(tool.execute(PlaceOrderInput(product_id="airmax", size="43", qty=1)))  # 43码库存0
+
+    assert result.is_error
+    assert "draft_id" not in result.metadata, "失败下单 metadata 不应有 draft_id"
+    print("✅ 步骤5 透出：失败下单 metadata 无 draft_id")
 
 
 def main():
@@ -246,8 +258,8 @@ def main():
     test_cancel_endpoint_nonexistent()
     test_cancel_endpoint_idempotent()
     test_cancel_idempotent_does_not_bypass_ownership()
-    test_extract_draft_id_from_place_order_output()
-    test_extract_draft_id_none_on_failure()
+    test_place_order_surfaces_draft_id_in_metadata()
+    test_place_order_failure_has_no_draft_id()
     print("\n🎉 步骤2 + 步骤3 + 步骤B + 步骤5后端 全部验证通过")
 
 
